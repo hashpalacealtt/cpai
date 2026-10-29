@@ -117,12 +117,11 @@ def run_benchmark(
 
 
 def parse_thread_candidates(value: str, cpu_count: int | None = None) -> list[int]:
-    detected = cpu_count or (os.cpu_count() or 4)
-    maximum = detected * 2
+    maximum = cpu_count if cpu_count is not None else (os.cpu_count() or 4) * 2
     candidates = sorted({int(part.strip()) for part in value.split(",") if part.strip()})
     if not candidates or any(item < 1 or item > maximum for item in candidates):
         raise argparse.ArgumentTypeError(
-            f"thread counts must be between 1 and {maximum} (2x logical CPUs)"
+            f"thread counts must be between 1 and {maximum} (2x logical CPUs by default)"
         )
     return candidates
 
