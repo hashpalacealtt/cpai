@@ -1,4 +1,4 @@
-"""Small stdlib-only client for a local llama.cpp server."""
+"""CPU inference engine backed by a locally built llama.cpp server."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M"
 
@@ -35,7 +34,9 @@ def find_server() -> str:
     return resolved
 
 
-def _request_json(url: str, payload: dict[str, Any] | None = None, timeout: float = 30) -> dict[str, Any]:
+def _request_json(
+    url: str, payload: dict[str, Any] | None = None, timeout: float = 30
+) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"} if data is not None else {}
     request = urllib.request.Request(url, data=data, headers=headers)
@@ -53,7 +54,6 @@ def extract_metrics(response: dict[str, Any]) -> dict[str, float | int]:
     generation_ms = float(timings.get("predicted_ms", 0.0))
     prompt_tokens = int(timings.get("prompt_n", 0))
     prompt_ms = float(timings.get("prompt_ms", 0.0))
-
     generation_tps = (
         float(timings["predicted_per_second"])
         if timings.get("predicted_per_second") is not None
@@ -66,7 +66,6 @@ def extract_metrics(response: dict[str, Any]) -> dict[str, float | int]:
     )
     if generated <= 0 or generation_tps <= 0:
         raise EngineError(f"Backend returned no usable generation timings: {timings!r}")
-
     return {
         "generated_tokens": generated,
         "generation_ms": round(generation_ms, 3),
@@ -84,14 +83,24 @@ class LlamaCppEngine:
         self,
         model: str = DEFAULT_MODEL,
         threads: int = 4,
+        threads_batch: int | None = None,
+        batch_size: int = 512,
+        ubatch_size: int = 128,
         context_size: int = 2048,
         port: int = 18080,
         startup_timeout: int = 900,
     ) -> None:
         if threads < 1:
             raise ValueError("threads must be at least 1")
+        if threads_batch is not None and threads_batch < 1:
+            raise ValueError("threads_batch must be at least 1")
+        if batch_size < 1 or ubatch_size < 1 or ubatch_size > batch_size:
+            raise ValueError("require 1 <= ubatch_size <= batch_size")
         self.model = model
         self.threads = threads
+        self.threads_batch = threads_batch or threads
+        self.batch_size = batch_size
+        self.ubatch_size = ubatch_size
         self.context_size = context_size
         self.port = self._free_port(port)
         self.startup_timeout = startup_timeout
@@ -119,6 +128,9 @@ class LlamaCppEngine:
             "--host", "127.0.0.1",
             "--port", str(self.port),
             "--threads", str(self.threads),
+            "--threads-batch", str(self.threads_batch),
+            "--batch-size", str(self.batch_size),
+            "--ubatch-size", str(self.ubatch_size),
             "--n-gpu-layers", "0",
             "--ctx-size", str(self.context_size),
             "--no-webui",
@@ -130,17 +142,16 @@ class LlamaCppEngine:
             stderr=subprocess.STDOUT,
             text=True,
         )
-
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                raise EngineError(f"llama-server exited during startup. Logs:\n{self.logs()}")
+                raise EngineError(f"llama-server exited during startup. Logs:\\n{self.logs()}")
             try:
                 _request_json(f"{self.base_url}/health", timeout=3)
                 return
             except EngineError:
-                time.sleep(2)
-        raise EngineError(f"Timed out waiting for llama-server. Logs:\n{self.logs()}")
+                time.sleep(1)
+        raise EngineError(f"Timed out waiting for llama-server. Logs:\\n{self.logs()}")
 
     def complete(self, prompt: str, max_tokens: int = 128) -> dict[str, Any]:
         if self.process is None or self.process.poll() is not None:

@@ -1,5 +1,6 @@
 import unittest
 
+from cpai.benchmark import parse_thread_candidates
 from cpai.engine import EngineError, extract_metrics
 
 
@@ -34,6 +35,13 @@ class MetricsTests(unittest.TestCase):
     def test_rejects_missing_generation_timing(self):
         with self.assertRaises(EngineError):
             extract_metrics({"timings": {"predicted_n": 0, "predicted_ms": 0}})
+
+    def test_thread_candidates_are_sorted_and_deduplicated(self):
+        self.assertEqual(parse_thread_candidates("4,2,4,1", 4), [1, 2, 4])
+
+    def test_thread_candidates_reject_out_of_range_values(self):
+        with self.assertRaises(Exception):
+            parse_thread_candidates("1,5", 4)
 
 
 if __name__ == "__main__":

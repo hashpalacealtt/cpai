@@ -2,19 +2,19 @@
 
 **Fast, reproducible CPU inference for small language models.**
 
-cpai is an experimental CPU-first inference runner and benchmark harness. The first reference workload is **Qwen2.5-1.5B-Instruct**, using the official GGUF **Q4_K_M** quantization and the CPU backend from [llama.cpp](https://github.com/ggml-org/llama.cpp).
+cpai is an experimental CPU-first inference runner and benchmark harness. The reference workload is **Qwen2.5-1.5B-Instruct**, using the official GGUF **Q4_K_M** quantization and the CPU backend from [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
 ## Goals
 
-- Run instruction models without requiring a GPU.
+- Run instruction models without a GPU.
 - Keep setup small: Python standard library + llama.cpp.
-- Measure generation throughput in **tokens/second**, prompt throughput, latency, and peak RSS where available.
-- Produce machine-readable JSON so results can be compared across CPUs and CI runs.
-- Keep benchmarks honest: report the runner CPU and thread count with every result.
+- Measure generation throughput, prompt throughput, and latency.
+- Sweep CPU thread counts and preserve per-configuration results.
+- Report CPU details and settings with every result.
 
 ## Quick start
 
-1. Install a CPU build of [llama.cpp](https://github.com/ggml-org/llama.cpp) and make `llama-server` available on your `PATH`.
+1. Build a CPU version of [llama.cpp](https://github.com/ggml-org/llama.cpp) and make `llama-server` available on `PATH`.
 2. Use Python 3.10 or newer.
 3. Run:
 
@@ -22,45 +22,43 @@ cpai is an experimental CPU-first inference runner and benchmark harness. The fi
 python -m cpai.benchmark
 ```
 
-By default cpai downloads/loads:
+The default model is `Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M`. The first run downloads the model weights; subsequent runs use the Hugging Face cache.
 
-```text
-Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M
-```
-
-The first run downloads approximately 1.12 GB of model weights. Subsequent runs use the Hugging Face cache.
-
-### Options
+## Tuning
 
 ```bash
-python -m cpai.benchmark --threads 4 --tokens 128 --runs 3
-python -m cpai.benchmark --model Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q5_K_M
-python -m cpai.benchmark --output results/local.json
+# Compare 1, 2, 3 and 4 CPU threads
+python -m cpai.benchmark --thread-candidates 1,2,3,4
+
+# Benchmark one specific configuration
+python -m cpai.benchmark --threads 4 --tokens 256 --runs 5
+
+# Change prompt-processing batch sizes
+python -m cpai.benchmark --threads 4 --batch-size 512 --ubatch-size 128
 ```
 
-You can also set `CPAI_LLAMA_SERVER` to the path of your llama-server executable.
+The benchmark warms up each configuration, measures repeated completions, and ranks configurations by median generation tokens/second. It does not assume that more threads are always faster.
 
-## Metrics
+## CPU build
 
-Each run records:
+For a benchmark running on the same machine that compiles llama.cpp, enable native CPU optimizations:
 
-- `generation_tokens_per_second`: generated tokens divided by generation time.
-- `prompt_tokens_per_second`: prompt tokens processed per second.
-- `generation_ms` and `prompt_ms`.
-- `generated_tokens`, model identifier, CPU information, thread count, and run count.
+```bash
+cmake -S llama.cpp -B llama.cpp/build \
+  -DGGML_NATIVE=ON \
+  -DGGML_OPENMP=ON \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build llama.cpp/build -j2 --target llama-server
+```
 
-The benchmark performs a short warm-up, then takes the median of repeated measured runs. CI results are measurements of that particular hosted runner, not universal hardware guarantees.
+Do not distribute a `GGML_NATIVE=ON` binary to machines with different CPU capabilities. For portable builds, use `GGML_NATIVE=OFF`.
 
-## GitHub Actions
+## Metrics and fairness
 
-The workflow runs on pushes and pull requests that modify cpai, and can also be started manually. It builds llama.cpp for CPU, runs unit tests, downloads the model, executes a bounded benchmark, and uploads the JSON result as a workflow artifact.
+Each configuration records every run plus median/min/max generation throughput and median prompt throughput. Results are specific to the reported runner and its CPU allocation. Compare results only when model revision, quantization, prompt, token limit, backend revision, and hardware allocation match.
 
-No scheduled jobs, GPU requests, mining, or unrelated workloads are used.
+GitHub Actions runs bounded tests on pushes, pull requests and manual dispatches. It does not run scheduled jobs or unrelated workloads.
 
 ## License
 
-The cpai source code is licensed under the MIT License. The Qwen model has its own Apache 2.0 license; see the [official model card](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) and [GGUF repository](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF). Model weights are downloaded from Hugging Face and are not bundled with cpai.
-
-## Status
-
-Early prototype. Initial benchmark numbers will be published after the first successful CI run.
+cpai source code is licensed under MIT. Qwen model weights have their own license; see the [official model card](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) and [GGUF repository](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF).

@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   test-and-benchmark:
-    name: CPU inference / Qwen 1.5B
+    name: CPU inference / Qwen 1.5B optimization
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -45,31 +45,38 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake libcurl4-openssl-dev
 
-      - name: Build llama.cpp for CPU
+      - name: Show runner CPU capabilities
+        run: |
+          lscpu
+          grep -m1 '^flags' /proc/cpuinfo || true
+
+      - name: Build llama.cpp with native CPU optimizations
         run: |
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
           cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
-            -DGGML_NATIVE=OFF \
+            -DGGML_NATIVE=ON \
             -DGGML_OPENMP=ON \
             -DGGML_CURL=ON \
             -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/llama.cpp/build --config Release -j2 --target llama-server
 
-      - name: Run bounded Qwen benchmark
+      - name: Run Qwen thread and batch tuning
         env:
           CPAI_LLAMA_SERVER: /tmp/llama.cpp/build/bin/llama-server
         run: |
           python -m cpai.benchmark \
-            --threads 4 \
-            --tokens 128 \
+            --thread-candidates 1,2,3,4 \
+            --tokens 160 \
             --runs 3 \
-            --output results/ubuntu-latest-qwen2.5-1.5b-q4km.json
+            --batch-size 512 \
+            --ubatch-size 128 \
+            --output results/ubuntu-latest-qwen2.5-1.5b-q4km-optimized.json
 
       - name: Upload benchmark result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cpai-cpu-benchmark
+          name: cpai-cpu-optimized-benchmark
           path: results/
           if-no-files-found: ignore
           retention-days: 14
