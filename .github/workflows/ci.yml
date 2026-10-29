@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   test-and-benchmark:
-    name: CPU inference / Qwen 1.5B 40 tok-s tuning
+    name: CPU inference / optimized Qwen 1.5B
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -57,18 +57,22 @@ jobs:
             -DGGML_NATIVE=ON \
             -DGGML_OPENMP=ON \
             -DGGML_CURL=ON \
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build /tmp/llama.cpp/build --config Release -j2 --target llama-server
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto"
+          cmake --build /tmp/llama.cpp/build --config Release -j4 --target llama-server
 
-      - name: Run Qwen thread and batch tuning
+      - name: Benchmark optimized Qwen CPU engine
         env:
           CPAI_LLAMA_SERVER: /tmp/llama.cpp/build/bin/llama-server
         run: |
           python -m cpai.benchmark \
-            --thread-candidates 3,4,5,6 \
-            --batch-candidates 256,512,1024 \
-            --ubatch-candidates 64,128,256 \
-            --tokens 192 \
+            --thread-candidates 2,4 \
+            --batch-candidates 256 \
+            --ubatch-candidates 256 \
+            --tokens 256 \
             --runs 3 \
             --output results/ubuntu-latest-qwen2.5-1.5b-q4km-40tuning.json
 
@@ -76,7 +80,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cpai-cpu-40tuning-benchmark
+          name: cpai-cpu-engine-benchmark
           path: results/
           if-no-files-found: ignore
           retention-days: 14

@@ -1,6 +1,6 @@
 import unittest
 
-from cpai.benchmark import parse_thread_candidates
+from cpai.benchmark import parse_size_candidates, parse_thread_candidates
 from cpai.engine import EngineError, extract_metrics
 
 
@@ -42,6 +42,13 @@ class MetricsTests(unittest.TestCase):
     def test_thread_candidates_reject_out_of_range_values(self):
         with self.assertRaises(Exception):
             parse_thread_candidates("1,5", 4)
+
+    def test_size_candidates_are_sorted_and_deduplicated(self):
+        self.assertEqual(parse_size_candidates("512,256,512", "batch"), [256, 512])
+
+    def test_size_candidates_reject_non_positive_values(self):
+        with self.assertRaises(Exception):
+            parse_size_candidates("0,128", "ubatch")
 
 
 if __name__ == "__main__":

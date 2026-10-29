@@ -136,11 +136,17 @@ class LlamaCppEngine:
             "--no-webui",
             "-hf", self.model,
         ]
+        server_env = os.environ.copy()
+        server_env.setdefault("OMP_NUM_THREADS", str(max(self.threads, self.threads_batch)))
+        server_env.setdefault("OMP_DYNAMIC", "FALSE")
+        server_env.setdefault("OMP_PROC_BIND", "close")
+        server_env.setdefault("OMP_PLACES", "cores")
         self.process = subprocess.Popen(
             command,
             stdout=self._log_file,
             stderr=subprocess.STDOUT,
             text=True,
+            env=server_env,
         )
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
