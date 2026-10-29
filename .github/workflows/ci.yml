@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   test-and-benchmark:
-    name: CPU inference / Qwen 1.5B optimization
+    name: CPU inference / Qwen 1.5B 40 tok-s tuning
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -65,18 +65,18 @@ jobs:
           CPAI_LLAMA_SERVER: /tmp/llama.cpp/build/bin/llama-server
         run: |
           python -m cpai.benchmark \
-            --thread-candidates 1,2,3,4 \
-            --tokens 160 \
+            --thread-candidates 3,4,5,6 \
+            --batch-candidates 256,512,1024 \
+            --ubatch-candidates 64,128,256 \
+            --tokens 192 \
             --runs 3 \
-            --batch-size 512 \
-            --ubatch-size 128 \
-            --output results/ubuntu-latest-qwen2.5-1.5b-q4km-optimized.json
+            --output results/ubuntu-latest-qwen2.5-1.5b-q4km-40tuning.json
 
       - name: Upload benchmark result
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cpai-cpu-optimized-benchmark
+          name: cpai-cpu-40tuning-benchmark
           path: results/
           if-no-files-found: ignore
           retention-days: 14
