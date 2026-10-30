@@ -38,6 +38,7 @@ jobs:
           cmake -S llama.cpp -B llama.cpp/build \
             -DGGML_NATIVE=ON \
             -DGGML_OPENMP=ON \
+            -DGGML_LTO=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -56,12 +57,12 @@ jobs:
             echo "cpu=$(lscpu | grep -E 'Model name|CPU\(s\)|Thread\(s\) per core|Core\(s\) per socket' | tr '\n' ';')"
             echo "model=Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M"
             echo "quantization=Q4_K_M"
+            echo "build_flags=GGML_NATIVE=ON,GGML_OPENMP=ON,GGML_LTO=ON,Release"
             echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
           } | tee results/environment.txt
 
       - name: Benchmark optimized CPU configurations
         env:
-          OMP_NUM_THREADS: 4
           OMP_DYNAMIC: "FALSE"
           OMP_PROC_BIND: close
           OMP_PLACES: cores
@@ -69,10 +70,10 @@ jobs:
         run: |
           python -m cpai.benchmark \
             --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
-            --thread-candidates 4 \
+            --thread-candidates 2,4 \
             --threads-batch-candidates 2,4 \
-            --cpu-strict-candidates 0,1 \
-            --poll-candidates 50,100 \
+            --cpu-strict-candidates 0 \
+            --poll-candidates 0,100 \
             --speculative-candidates none \
             --tokens 128 \
             --runs 2 \

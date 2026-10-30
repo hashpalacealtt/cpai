@@ -99,7 +99,7 @@ class LlamaCppEngine:
         flash_attention: str = "auto",
         numa: str | None = None,
         mlock: bool = False,
-        cpu_strict: bool = True,
+        cpu_strict: bool = False,
         poll: int = 100,
         speculative_type: str = "none",
         speculative_tokens: int = 64,

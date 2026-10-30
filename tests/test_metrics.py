@@ -105,7 +105,7 @@ class EngineCommandTests(unittest.TestCase):
         self.assertIn("--flash-attn", command)
         self.assertEqual(command[command.index("--flash-attn") + 1], "auto")
         self.assertEqual(command[command.index("--cache-type-k") + 1], "f16")
-        self.assertEqual(command[command.index("--cpu-strict") + 1], "1")
+        self.assertEqual(command[command.index("--cpu-strict") + 1], "0")
         self.assertEqual(command[command.index("--poll") + 1], "100")
         self.assertEqual(engine.speculative_type, "none")
         self.assertNotIn("--spec-type", command)
