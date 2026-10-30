@@ -8,12 +8,14 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/ci.yml"
+      - "patches/llama.cpp/**"
   pull_request:
     paths:
       - "cpai/**"
       - "tests/**"
       - "pyproject.toml"
       - ".github/workflows/ci.yml"
+      - "patches/llama.cpp/**"
   workflow_dispatch:
 
 permissions:
@@ -103,17 +105,20 @@ jobs:
               --runs 3 \
               --output results/upstream-baseline.json
 
-      - name: Build, test and benchmark AVX2 kernel candidate
+      - name: Build, test and benchmark vendored AVX2 kernel patch
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
         run: |
           git init /tmp/llama-candidate
-          git -C /tmp/llama-candidate remote add origin https://github.com/silicium369-spec/llama.cpp.git
-          git -C /tmp/llama-candidate fetch --depth=1 origin b77e97fcf3ab296391db149d9a38628913e181d6
+          git -C /tmp/llama-candidate remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C /tmp/llama-candidate fetch --depth=1 origin 7894e8b92481a8bb8ffe94f73b656ffe0dd01e10
           git -C /tmp/llama-candidate checkout --detach FETCH_HEAD
-          test "$(git -C /tmp/llama-candidate rev-parse HEAD)" = "b77e97fcf3ab296391db149d9a38628913e181d6"
+          git -C /tmp/llama-candidate apply --check "$GITHUB_WORKSPACE/patches/llama.cpp/0001-x86-quantized-dot-unroll.patch"
+          git -C /tmp/llama-candidate apply "$GITHUB_WORKSPACE/patches/llama.cpp/0001-x86-quantized-dot-unroll.patch"
+          git -C /tmp/llama-candidate diff --check
+          git -C /tmp/llama-candidate diff --stat
           cmake -S /tmp/llama-candidate -B /tmp/llama-candidate/build \
             -DGGML_NATIVE=ON \
             -DGGML_AVX2=ON \
@@ -140,6 +145,8 @@ jobs:
               --output results/avx2-kernel-candidate.json
 
       - name: Compare identical-hardware benchmark results
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
         run: |
           python - <<'PY'
           import json
@@ -156,9 +163,10 @@ jobs:
               "variant": "upstream baseline",
           }
           candidate["engine_build"] = {
-              "repository": "https://github.com/silicium369-spec/llama.cpp",
-              "commit": "b77e97fcf3ab296391db149d9a38628913e181d6",
-              "variant": "AVX2 quantized dot-product candidate",
+              "repository": "https://github.com/ggml-org/llama.cpp",
+              "commit": "7894e8b92481a8bb8ffe94f73b656ffe0dd01e10",
+              "variant": "cpai vendored AVX2 quantized dot-product patch",
+              "patch": "patches/llama.cpp/0001-x86-quantized-dot-unroll.patch",
           }
           baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
           candidate_path.write_text(json.dumps(candidate, indent=2) + "\n", encoding="utf-8")
