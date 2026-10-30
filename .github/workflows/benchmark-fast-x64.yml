@@ -1,6 +1,7 @@
 name: Fast x64 CPU benchmark
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,11 +24,16 @@ jobs:
           ref: master
           path: llama.cpp
 
+      - name: Resolve llama.cpp revision
+        id: llama
+        shell: bash
+        run: echo "sha=$(git -C llama.cpp rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Restore llama.cpp build cache
         uses: actions/cache@v4
         with:
           path: llama.cpp/build
-          key: ${{ runner.os }}-${{ runner.arch }}-llama-master-native-openmp-v1
+          key: ${{ runner.os }}-${{ runner.arch }}-llama-${{ steps.llama.outputs.sha }}-native-openmp-v1
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-llama-
 
