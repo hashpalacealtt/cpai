@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   test-and-benchmark:
-    name: CPU inference / optimized Qwen 1.5B
+    name: CPU inference / controlled AVX2 A-B
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -37,7 +37,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run unit tests
+      - name: Run cpai unit tests
         run: python -m unittest discover -s tests -v
 
       - name: Install build dependencies
@@ -48,39 +48,38 @@ jobs:
       - name: Restore llama.cpp compiler cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/ccache
+          path: .ccache
           key: ${{ runner.os }}-${{ runner.arch }}-llama-cpp-ccache-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-llama-cpp-ccache-
 
       - name: Configure compiler cache
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
         run: |
-          mkdir -p ~/.cache/ccache
+          mkdir -p "$CCACHE_DIR"
           ccache --set-config=max_size=2G
           ccache --set-config=compiler_check=content
           ccache --zero-stats
+          ccache --show-stats
 
       - name: Show runner CPU capabilities
         run: |
           lscpu
           grep -m1 '^flags' /proc/cpuinfo || true
 
-      - name: Fetch pinned AVX2 kernel candidate
-        run: |
-          git init /tmp/llama.cpp
-          git -C /tmp/llama.cpp remote add origin https://github.com/silicium369-spec/llama.cpp.git
-          git -C /tmp/llama.cpp fetch --depth=1 origin b77e97fcf3ab296391db149d9a38628913e181d6
-          git -C /tmp/llama.cpp checkout --detach FETCH_HEAD
-          test "$(git -C /tmp/llama.cpp rev-parse HEAD)" = "b77e97fcf3ab296391db149d9a38628913e181d6"
-          echo "llama.cpp candidate: $(git -C /tmp/llama.cpp rev-parse HEAD)"
-
-      - name: Build llama.cpp with native AVX2 CPU kernels
+      - name: Build and benchmark upstream baseline
         env:
-          CCACHE_DIR: ~/.cache/ccache
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
         run: |
-          cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
+          git init /tmp/llama-baseline
+          git -C /tmp/llama-baseline remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C /tmp/llama-baseline fetch --depth=1 origin 7894e8b92481a8bb8ffe94f73b656ffe0dd01e10
+          git -C /tmp/llama-baseline checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/llama-baseline rev-parse HEAD)" = "7894e8b92481a8bb8ffe94f73b656ffe0dd01e10"
+          cmake -S /tmp/llama-baseline -B /tmp/llama-baseline/build \
             -DGGML_NATIVE=ON \
             -DGGML_AVX2=ON \
             -DGGML_FMA=ON \
@@ -94,35 +93,97 @@ jobs:
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-flto"
-          cmake --build /tmp/llama.cpp/build --config Release -j4 --target llama-server test-quantize-fns test-backend-ops
-          ctest --test-dir /tmp/llama.cpp/build --output-on-failure -R 'test-quantize-fns|test-backend-ops'
-          ccache --show-stats
+          cmake --build /tmp/llama-baseline/build --config Release -j4 --target llama-server
+          CPAI_LLAMA_SERVER=/tmp/llama-baseline/build/bin/llama-server \
+            python -m cpai.benchmark \
+              --thread-candidates 2,4 \
+              --batch-candidates 256 \
+              --ubatch-candidates 256 \
+              --tokens 256 \
+              --runs 3 \
+              --output results/upstream-baseline.json
 
-      - name: Benchmark optimized Qwen CPU engine
+      - name: Build, test and benchmark AVX2 kernel candidate
         env:
-          CPAI_LLAMA_SERVER: /tmp/llama.cpp/build/bin/llama-server
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
         run: |
-          python -m cpai.benchmark \
-            --thread-candidates 2,4 \
-            --batch-candidates 256 \
-            --ubatch-candidates 256 \
-            --tokens 256 \
-            --runs 3 \
-            --output results/ubuntu-latest-qwen2.5-1.5b-q4km-40tuning.json
+          git init /tmp/llama-candidate
+          git -C /tmp/llama-candidate remote add origin https://github.com/silicium369-spec/llama.cpp.git
+          git -C /tmp/llama-candidate fetch --depth=1 origin b77e97fcf3ab296391db149d9a38628913e181d6
+          git -C /tmp/llama-candidate checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/llama-candidate rev-parse HEAD)" = "b77e97fcf3ab296391db149d9a38628913e181d6"
+          cmake -S /tmp/llama-candidate -B /tmp/llama-candidate/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_AVX2=ON \
+            -DGGML_FMA=ON \
+            -DGGML_F16C=ON \
+            -DGGML_OPENMP=ON \
+            -DGGML_CURL=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto"
+          cmake --build /tmp/llama-candidate/build --config Release -j4 --target llama-server test-quantize-fns test-backend-ops
+          ctest --test-dir /tmp/llama-candidate/build --output-on-failure -R 'test-quantize-fns'
+          CPAI_LLAMA_SERVER=/tmp/llama-candidate/build/bin/llama-server \
+            python -m cpai.benchmark \
+              --thread-candidates 2,4 \
+              --batch-candidates 256 \
+              --ubatch-candidates 256 \
+              --tokens 256 \
+              --runs 3 \
+              --output results/avx2-kernel-candidate.json
+
+      - name: Compare identical-hardware benchmark results
+        run: |
           python - <<'PY'
           import json
           from pathlib import Path
-          path = Path("results/ubuntu-latest-qwen2.5-1.5b-q4km-40tuning.json")
-          data = json.loads(path.read_text(encoding="utf-8"))
-          data["engine_build"] = {
+
+          baseline_path = Path("results/upstream-baseline.json")
+          candidate_path = Path("results/avx2-kernel-candidate.json")
+          baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+          candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+
+          baseline["engine_build"] = {
+              "repository": "https://github.com/ggml-org/llama.cpp",
+              "commit": "7894e8b92481a8bb8ffe94f73b656ffe0dd01e10",
+              "variant": "upstream baseline",
+          }
+          candidate["engine_build"] = {
               "repository": "https://github.com/silicium369-spec/llama.cpp",
               "commit": "b77e97fcf3ab296391db149d9a38628913e181d6",
-              "optimization": "x86 AVX2 quantized dot-product kernels",
+              "variant": "AVX2 quantized dot-product candidate",
           }
-          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-          PY
+          baseline_path.write_text(json.dumps(baseline, indent=2) + "\n", encoding="utf-8")
+          candidate_path.write_text(json.dumps(candidate, indent=2) + "\n", encoding="utf-8")
 
-      - name: Upload benchmark result
+          def median(data):
+              return float(data["best_configuration"]["summary"]["generation_tokens_per_second_median"])
+
+          base_tps = median(baseline)
+          candidate_tps = median(candidate)
+          delta = (candidate_tps / base_tps - 1.0) * 100.0
+          comparison = {
+              "same_runner_cpu": baseline.get("cpu"),
+              "baseline_median_tok_s": base_tps,
+              "candidate_median_tok_s": candidate_tps,
+              "delta_percent": round(delta, 2),
+              "candidate_faster": candidate_tps > base_tps,
+          }
+          Path("results/ab-comparison.json").write_text(
+              json.dumps(comparison, indent=2) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(comparison, indent=2))
+          PY
+          ccache --show-stats
+
+      - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v4
         with:
