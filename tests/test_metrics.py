@@ -89,7 +89,7 @@ class EngineCommandTests(unittest.TestCase):
         engine = LlamaCppEngine(
             port=0, threads=2,
             draft_model="Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M",
-            draft_tokens=8, draft_threads=1,
+            draft_tokens=8, draft_threads=1, speculative_type="none",
         )
         command = engine._build_command("llama-server")
         self.assertEqual(command[command.index("--spec-type") + 1], "draft-simple")
