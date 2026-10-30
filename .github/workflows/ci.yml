@@ -16,6 +16,14 @@ on:
           - Q4_K_M
           - Q4_0
         default: Q4_K_M
+      benchmark_profile:
+        description: "Full scheduling sweep or focused speculative-draft test"
+        required: true
+        type: choice
+        options:
+          - full
+          - draft
+        default: full
 
 permissions:
   contents: read
@@ -81,19 +89,36 @@ jobs:
       - name: Run CPU scheduling and speculative benchmark
         env:
           CPAI_LLAMA_SERVER: ${{ github.workspace }}/llama.cpp/build/bin/llama-server
-        run: >-
-          python -m cpai.benchmark
-          --model "Qwen/Qwen2.5-1.5B-Instruct-GGUF:${{ inputs.model_quantization }}"
-          --thread-candidates 1,2,3,4
-          --cpu-strict-candidates 0,1
-          --poll-candidates 0,50,100
-          --speculative-candidates none,ngram-mod
-          --speculative-tokens 64
-          --tokens 256
-          --runs 2
-          --batch-candidates 512
-          --ubatch-candidates 128
-          --output results/benchmark.json
+        run: |
+          MODEL="Qwen/Qwen2.5-1.5B-Instruct-GGUF:${{ inputs.model_quantization }}"
+          if [ "${{ inputs.benchmark_profile }}" = "draft" ]; then
+            python -m cpai.benchmark \
+              --model "$MODEL" \
+              --thread-candidates 2 \
+              --cpu-strict-candidates 1 \
+              --poll-candidates 50 \
+              --speculative-candidates none \
+              --draft-model "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M" \
+              --draft-token-candidates 8,16,24,32 \
+              --tokens 256 \
+              --runs 3 \
+              --batch-candidates 512 \
+              --ubatch-candidates 128 \
+              --output results/benchmark.json
+          else
+            python -m cpai.benchmark \
+              --model "$MODEL" \
+              --thread-candidates 1,2,3,4 \
+              --cpu-strict-candidates 0,1 \
+              --poll-candidates 0,50,100 \
+              --speculative-candidates none,ngram-mod \
+              --speculative-tokens 64 \
+              --tokens 256 \
+              --runs 2 \
+              --batch-candidates 512 \
+              --ubatch-candidates 128 \
+              --output results/benchmark.json
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from cpai.benchmark import (
-    parse_choice_candidates, parse_size_candidates, parse_thread_candidates,
+    parse_choice_candidates, parse_size_candidates, parse_thread_candidates, run_benchmark,
 )
 from cpai.engine import EngineError, LlamaCppEngine, extract_metrics
 
@@ -51,6 +51,33 @@ class MetricsTests(unittest.TestCase):
         )
         with self.assertRaises(Exception):
             parse_choice_candidates("turboquant", {"none", "ngram-mod"}, "spec")
+
+    @patch("cpai.benchmark.cpu_description", return_value="test cpu")
+    @patch("cpai.benchmark.run_configuration")
+    def test_draft_sweep_includes_baseline_and_each_draft_length(self, run_config, _cpu):
+        def result(*args, **kwargs):
+            count = kwargs.get("draft_tokens") if kwargs.get("draft_model") else 0
+            return {
+                "draft_model": kwargs.get("draft_model"),
+                "draft_tokens": count or None,
+                "summary": {"generation_tokens_per_second_median": float(count or 1)},
+            }
+        run_config.side_effect = result
+        report = run_benchmark(
+            "target", [2], 64, 2, [512], [128], [1], [50], ["none"],
+            64, "draft-model", [8, 16],
+        )
+        self.assertEqual(run_config.call_count, 3)
+        self.assertEqual(report["draft_model"], "draft-model")
+        self.assertEqual(report["tested_draft_token_counts"], [8, 16])
+        self.assertEqual({c["draft_tokens"] for c in report["configurations"]}, {None, 8, 16})
+
+    def test_draft_sweep_rejects_ngram_mode(self):
+        with self.assertRaises(ValueError):
+            run_benchmark(
+                "target", [2], 64, 2, [512], [128], [1], [50], ["ngram-mod"],
+                64, "draft-model", [8],
+            )
 
 
 class EngineCommandTests(unittest.TestCase):

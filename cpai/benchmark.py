@@ -49,6 +49,7 @@ def run_configuration(
     batch_size: int, ubatch_size: int,
     cpu_strict: bool = False, poll: int = 50,
     speculative_type: str = "none", speculative_tokens: int = 64,
+    draft_model: str | None = None, draft_tokens: int = 8,
 ) -> dict[str, Any]:
     engine = LlamaCppEngine(
         model=model,
@@ -58,8 +59,10 @@ def run_configuration(
         ubatch_size=ubatch_size,
         cpu_strict=cpu_strict,
         poll=poll,
-        speculative_type=speculative_type,
+        speculative_type="none" if draft_model else speculative_type,
         speculative_tokens=speculative_tokens,
+        draft_model=draft_model,
+        draft_tokens=draft_tokens,
     )
     results: list[dict[str, float | int]] = []
     try:
@@ -84,8 +87,10 @@ def run_configuration(
         "cpu_strict": cpu_strict,
         "poll": poll,
         "cache_prompt": False,
-        "speculative_type": speculative_type,
-        "speculative_tokens": speculative_tokens if speculative_type != "none" else None,
+        "speculative_type": "draft-simple" if draft_model else speculative_type,
+        "draft_model": draft_model,
+        "draft_tokens": draft_tokens if draft_model else None,
+        "speculative_tokens": speculative_tokens if speculative_type != "none" and not draft_model else None,
         "runs": results,
         "summary": {
             "generation_tokens_per_second_median": round(statistics.median(rates), 3),
@@ -102,6 +107,7 @@ def run_benchmark(
     batch_candidates: list[int], ubatch_candidates: list[int],
     cpu_strict_candidates: list[int], poll_candidates: list[int],
     speculative_candidates: list[str], speculative_tokens: int = 64,
+    draft_model: str | None = None, draft_token_candidates: list[int] | None = None,
 ) -> dict[str, Any]:
     combinations = [
         (threads, batch, ubatch, bool(strict), poll, speculative)
@@ -111,14 +117,22 @@ def run_benchmark(
         )
         if ubatch <= batch
     ]
+    if draft_model and speculative_candidates != ["none"]:
+        raise ValueError("draft_model requires speculative_candidates=['none']")
+    draft_options: list[int | None] = (
+        [None, *(draft_token_candidates or [8, 16, 24, 32])] if draft_model else [None]
+    )
     configurations = [
         run_configuration(
             model, threads, tokens, runs, batch, ubatch,
             cpu_strict=strict, poll=poll,
             speculative_type=speculative,
             speculative_tokens=speculative_tokens,
+            draft_model=draft_model if draft_count is not None else None,
+            draft_tokens=draft_count or 8,
         )
         for threads, batch, ubatch, strict, poll, speculative in combinations
+        for draft_count in draft_options
     ]
     configurations.sort(
         key=lambda item: item["summary"]["generation_tokens_per_second_median"],
@@ -138,6 +152,8 @@ def run_benchmark(
         "tested_cpu_strict": cpu_strict_candidates,
         "tested_poll_levels": poll_candidates,
         "tested_speculative_types": speculative_candidates,
+        "draft_model": draft_model,
+        "tested_draft_token_counts": draft_token_candidates if draft_model else [],
         "tested_batch_sizes": batch_candidates,
         "tested_ubatch_sizes": ubatch_candidates,
         "configurations": configurations,
@@ -183,6 +199,8 @@ def main() -> None:
     parser.add_argument("--poll-candidates", default="0,50,100")
     parser.add_argument("--speculative-candidates", default="none,ngram-mod")
     parser.add_argument("--speculative-tokens", type=int, default=64)
+    parser.add_argument("--draft-model", default=None)
+    parser.add_argument("--draft-token-candidates", default="8,16,24,32")
     parser.add_argument("--batch-candidates", default="512")
     parser.add_argument("--ubatch-candidates", default="128")
     parser.add_argument("--tokens", type=int, default=256)
@@ -194,6 +212,7 @@ def main() -> None:
         parser.error("--tokens must be >= 32 and --runs must be >= 2")
     if args.speculative_tokens < 1:
         parser.error("--speculative-tokens must be >= 1")
+    draft_tokens = parse_size_candidates(args.draft_token_candidates, "--draft-token-candidates")
     threads = parse_thread_candidates(args.thread_candidates)
     strict = parse_size_candidates(args.cpu_strict_candidates, "--cpu-strict-candidates", minimum=0)
     if any(item not in {0, 1} for item in strict):
@@ -212,6 +231,7 @@ def main() -> None:
     result = run_benchmark(
         args.model, threads, args.tokens, args.runs, batches, ubatches,
         strict, polls, speculative, args.speculative_tokens,
+        args.draft_model, draft_tokens,
     )
     rendered = json.dumps(result, indent=2, ensure_ascii=False)
     print(rendered)
