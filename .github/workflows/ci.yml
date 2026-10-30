@@ -42,7 +42,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   benchmark:
-    name: CPU benchmark (scheduling + ngram speculative sweep)
+    name: CPU benchmark (Linux x86_64)
     if: ${{ inputs.run_benchmark }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -80,8 +80,8 @@ jobs:
           {
             echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
             echo "runner=$(uname -a)"
-            echo "cpu=$(lscpu | grep -E 'Model name|CPU\\(s\\)|Core\\(s\\) per socket|Thread\\(s\\) per core|NUMA node')"
-            echo "affinity=$(taskset -pc $$)"
+            echo "cpu=$(lscpu | grep -E 'Model name|CPU\\(s\\)|Core\\(s\\) per socket|Thread\\(s\\) per core|NUMA node' || true)"
+            echo "affinity=$(taskset -pc $$ 2>/dev/null || true)"
             echo "cgroup_cpu_max=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || true)"
             echo "cgroup_cpuset=$(cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null || true)"
             echo "model_quantization=${{ inputs.model_quantization }}"
@@ -122,7 +122,85 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: cpai-cpu-benchmark
+          name: cpai-cpu-benchmark-linux
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
+
+  benchmark-apple-silicon:
+    name: Apple Silicon M1 CPU benchmark
+    if: ${{ inputs.run_benchmark }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ccache
+        run: brew install ccache
+      - name: Cache llama.cpp compiler objects
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: macos-arm64-llama-ccache-${{ github.sha }}
+          restore-keys: |
+            macos-arm64-llama-ccache-
+      - name: Configure Apple Silicon CPU backend
+        env:
+          CCACHE_DIR: ~/Library/Caches/ccache
+        run: |
+          ccache --max-size=2G
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_METAL=OFF \
+            -DGGML_ACCELERATE=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build llama-server
+        run: cmake --build llama.cpp/build --config Release --target llama-server -j3
+      - name: Install cpai
+        run: python -m pip install -e .
+      - name: Record Apple Silicon runner details
+        run: |
+          mkdir -p results
+          {
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+            echo "runner=$(uname -a)"
+            echo "architecture=$(uname -m)"
+            echo "cpu=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+            echo "physical_cpus=$(sysctl -n hw.physicalcpu 2>/dev/null || true)"
+            echo "logical_cpus=$(sysctl -n hw.logicalcpu 2>/dev/null || true)"
+            echo "memory_bytes=$(sysctl -n hw.memsize 2>/dev/null || true)"
+            echo "model_quantization=Q4_0"
+            echo "backend=Apple Accelerate, Metal disabled (CPU-only)"
+          } | tee results/environment.txt
+      - name: Run Apple Silicon thread and polling sweep
+        env:
+          CPAI_LLAMA_SERVER: ${{ github.workspace }}/llama.cpp/build/bin/llama-server
+        run: |
+          python -m cpai.benchmark \
+            --model "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_0" \
+            --thread-candidates 1,2,3,4,6 \
+            --cpu-strict-candidates 0 \
+            --poll-candidates 0,50,100 \
+            --speculative-candidates none \
+            --tokens 256 \
+            --runs 3 \
+            --batch-candidates 512 \
+            --ubatch-candidates 128 \
+            --output results/benchmark.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-cpu-benchmark-apple-silicon
           path: results/
           if-no-files-found: warn
           retention-days: 30
