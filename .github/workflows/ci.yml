@@ -42,7 +42,7 @@ jobs:
       - name: Cache llama.cpp compiler objects
         uses: actions/cache@v4
         with:
-          path: ~/.cache/ccache
+          path: ${{ runner.temp }}/ccache
           key: ${{ runner.os }}-llama-ccache-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-llama-ccache-
