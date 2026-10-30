@@ -134,7 +134,7 @@ def run_benchmark(
             draft_model=draft_model if draft_count is not None else None,
             draft_tokens=draft_count or 8,
         )
-        for threads, batch, ubatch, strict, poll, speculative in combinations
+        for threads, threads_batch, batch, ubatch, strict, poll, speculative in combinations
         for draft_count in draft_options
     ]
     configurations.sort(

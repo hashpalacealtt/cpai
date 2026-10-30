@@ -72,6 +72,24 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(report["tested_draft_token_counts"], [8, 16])
         self.assertEqual({c["draft_tokens"] for c in report["configurations"]}, {None, 8, 16})
 
+    @patch("cpai.benchmark.cpu_description", return_value="test cpu")
+    @patch("cpai.benchmark.run_configuration")
+    def test_threads_batch_candidates_are_swept_independently(self, run_config, _cpu):
+        run_config.side_effect = lambda *args, **kwargs: {
+            "threads_batch": kwargs.get("threads_batch"),
+            "summary": {"generation_tokens_per_second_median": 20.0},
+        }
+        report = run_benchmark(
+            "target", [4], 64, 2, [512], [128], [1], [50], ["none"],
+            threads_batch_candidates=[2, 4],
+        )
+        self.assertEqual(run_config.call_count, 2)
+        self.assertEqual(report["tested_threads_batch_counts"], [2, 4])
+        self.assertEqual(
+            [call.kwargs["threads_batch"] for call in run_config.call_args_list],
+            [2, 4],
+        )
+
     def test_draft_sweep_rejects_ngram_mode(self):
         with self.assertRaises(ValueError):
             run_benchmark(
@@ -89,7 +107,8 @@ class EngineCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--cache-type-k") + 1], "f16")
         self.assertEqual(command[command.index("--cpu-strict") + 1], "1")
         self.assertEqual(command[command.index("--poll") + 1], "100")
-        self.assertEqual(command[command.index("--spec-type") + 1], "ngram-mod")
+        self.assertEqual(engine.speculative_type, "none")
+        self.assertNotIn("--spec-type", command)
         self.assertNotIn("--mlock", command)
 
     def test_cpu_affinity_and_polling_are_configurable(self):
