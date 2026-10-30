@@ -60,7 +60,7 @@ jobs:
             echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
           } | tee results/environment.txt
 
-      - name: Benchmark optimized CPU configurations
+      - name: Stability benchmark (fixed best configuration)
         env:
           OMP_DYNAMIC: "FALSE"
           OMP_PROC_BIND: close
@@ -69,16 +69,16 @@ jobs:
         run: |
           python -m cpai.benchmark \
             --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
-            --thread-candidates 3,4 \
-            --threads-batch-candidates 2,4 \
+            --thread-candidates 4 \
+            --threads-batch-candidates 2 \
             --cpu-strict-candidates 0 \
             --poll-candidates 0 \
-            --poll-batch-candidates 0,1  \
+            --poll-batch-candidates 1\
             --speculative-candidates none \
-            --tokens 192 \
-            --runs 3 \
+            --tokens 384 \
+            --runs 9 \
             --batch-candidates 512 \
-            --ubatch-candidates 64,128 \
+            --ubatch-candidates 128 \
             --output results/benchmark.json
 
       - uses: actions/upload-artifact@v4

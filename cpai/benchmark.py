@@ -69,7 +69,8 @@ def run_configuration(
     results: list[dict[str, float | int]] = []
     try:
         with engine:
-            engine.complete(PROMPT, max_tokens=16, ignore_eos=True, cache_prompt=False)
+            for _ in range(2):
+                engine.complete(PROMPT, max_tokens=64, ignore_eos=True, cache_prompt=False)
             for _ in range(runs):
                 response = engine.complete(
                     PROMPT, max_tokens=tokens, ignore_eos=True, cache_prompt=False
@@ -99,6 +100,10 @@ def run_configuration(
             "generation_tokens_per_second_median": round(statistics.median(rates), 3),
             "generation_tokens_per_second_min": round(min(rates), 3),
             "generation_tokens_per_second_max": round(max(rates), 3),
+            "generation_tokens_per_second_stdev": round(statistics.pstdev(rates), 3),
+            "generation_tokens_per_second_cv_percent": round(
+                statistics.pstdev(rates) / statistics.mean(rates) * 100, 3
+            ) if statistics.mean(rates) else 0.0,
             "prompt_tokens_per_second_median": round(statistics.median(prompt_rates), 3),
             "prompt_tokens_median": round(statistics.median(prompt_counts), 1),
         },
