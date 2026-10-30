@@ -155,13 +155,14 @@ def parse_thread_candidates(value: str, cpu_count: int | None = None) -> list[in
     return candidates
 
 
-def parse_size_candidates(value: str, name: str) -> list[int]:
+def parse_size_candidates(value: str, name: str, minimum: int = 1) -> list[int]:
     try:
         candidates = sorted({int(part.strip()) for part in value.split(",") if part.strip()})
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"{name} must be comma-separated integers") from exc
-    if not candidates or any(item < 1 for item in candidates):
-        raise argparse.ArgumentTypeError(f"{name} values must be positive")
+    if not candidates or any(item < minimum for item in candidates):
+        qualifier = "non-negative" if minimum == 0 else "positive"
+        raise argparse.ArgumentTypeError(f"{name} values must be {qualifier}")
     return candidates
 
 
@@ -194,10 +195,10 @@ def main() -> None:
     if args.speculative_tokens < 1:
         parser.error("--speculative-tokens must be >= 1")
     threads = parse_thread_candidates(args.thread_candidates)
-    strict = parse_size_candidates(args.cpu_strict_candidates, "--cpu-strict-candidates")
+    strict = parse_size_candidates(args.cpu_strict_candidates, "--cpu-strict-candidates", minimum=0)
     if any(item not in {0, 1} for item in strict):
         parser.error("--cpu-strict-candidates values must be 0 or 1")
-    polls = parse_size_candidates(args.poll_candidates, "--poll-candidates")
+    polls = parse_size_candidates(args.poll_candidates, "--poll-candidates", minimum=0)
     if any(item > 100 for item in polls):
         parser.error("--poll-candidates values must be between 0 and 100")
     speculative = parse_choice_candidates(
