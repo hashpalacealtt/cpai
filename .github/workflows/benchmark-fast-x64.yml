@@ -1,6 +1,8 @@
 name: Fast x64 CPU benchmark
 
 "on":
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
