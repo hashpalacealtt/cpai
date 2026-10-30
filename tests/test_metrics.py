@@ -53,6 +53,31 @@ class MetricsTests(unittest.TestCase):
 
 
 class EngineRequestTests(unittest.TestCase):
+    def test_default_command_does_not_enable_speculative_decoding(self):
+        engine = LlamaCppEngine(port=0)
+        command = engine._build_command("llama-server")
+        self.assertNotIn("--spec-type", command)
+        self.assertNotIn("--spec-draft-hf", command)
+
+    def test_speculative_draft_command_uses_draft_simple_and_thread_budget(self):
+        engine = LlamaCppEngine(
+            port=0,
+            threads=2,
+            draft_model="Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M",
+            draft_tokens=8,
+            draft_threads=1,
+        )
+        command = engine._build_command("llama-server")
+        self.assertEqual(command[command.index("--spec-type") + 1], "draft-simple")
+        self.assertEqual(command[command.index("--spec-draft-hf") + 1],
+                         "Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M")
+        self.assertEqual(command[command.index("--spec-draft-n-max") + 1], "8")
+        self.assertEqual(command[command.index("--spec-draft-threads") + 1], "1")
+
+    def test_rejects_zero_draft_tokens(self):
+        with self.assertRaises(ValueError):
+            LlamaCppEngine(port=0, draft_tokens=0)
+
     def test_completion_can_ignore_eos_for_fixed_length_benchmarks(self):
         engine = LlamaCppEngine(port=0)
         process = Mock()

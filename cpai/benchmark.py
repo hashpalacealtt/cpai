@@ -45,13 +45,21 @@ def cpu_description() -> str:
 def run_configuration(
     model: str, threads: int, tokens: int, runs: int,
     batch_size: int, ubatch_size: int,
+    draft_model: str | None = None, draft_tokens: int = 8,
+    draft_threads: int | None = None,
 ) -> dict[str, Any]:
+    effective_draft_threads = (
+        draft_threads or max(1, threads // 2) if draft_model else None
+    )
     engine = LlamaCppEngine(
         model=model,
         threads=threads,
         threads_batch=threads,
         batch_size=batch_size,
         ubatch_size=ubatch_size,
+        draft_model=draft_model,
+        draft_tokens=draft_tokens,
+        draft_threads=effective_draft_threads,
     )
     results: list[dict[str, float | int]] = []
     try:
@@ -70,6 +78,9 @@ def run_configuration(
         "threads_batch": threads,
         "batch_size": batch_size,
         "ubatch_size": ubatch_size,
+        "draft_model": draft_model,
+        "draft_tokens": draft_tokens if draft_model else None,
+        "draft_threads": effective_draft_threads,
         "runs": results,
         "summary": {
             "generation_tokens_per_second_median": round(statistics.median(rates), 3),
@@ -83,6 +94,8 @@ def run_configuration(
 def run_benchmark(
     model: str, thread_candidates: list[int], tokens: int, runs: int,
     batch_candidates: list[int], ubatch_candidates: list[int],
+    draft_model: str | None = None, draft_tokens: int = 8,
+    draft_threads: int | None = None,
 ) -> dict[str, Any]:
     combinations = [
         (threads, batch, ubatch)
@@ -92,7 +105,12 @@ def run_benchmark(
         if ubatch <= batch
     ]
     configurations = [
-        run_configuration(model, threads, tokens, runs, batch, ubatch)
+        run_configuration(
+            model, threads, tokens, runs, batch, ubatch,
+            draft_model=draft_model,
+            draft_tokens=draft_tokens,
+            draft_threads=draft_threads,
+        )
         for threads, batch, ubatch in combinations
     ]
     configurations.sort(
@@ -102,6 +120,9 @@ def run_benchmark(
     return {
         "schema_version": 3,
         "model": model,
+        "draft_model": draft_model,
+        "draft_tokens": draft_tokens if draft_model else None,
+        "draft_threads": draft_threads,
         "backend": "llama.cpp",
         "device": "CPU",
         "cpu": cpu_description(),
@@ -141,6 +162,9 @@ def main() -> None:
         description="Benchmark a GGUF model on CPU using llama.cpp."
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--draft-model", default=None)
+    parser.add_argument("--draft-tokens", type=int, default=8)
+    parser.add_argument("--draft-threads", type=int, default=None)
     parser.add_argument("--threads", type=int, default=None)
     parser.add_argument("--thread-candidates", default="2,4")
     parser.add_argument("--batch-candidates", default="256")
@@ -152,6 +176,12 @@ def main() -> None:
 
     if args.tokens < 32 or args.runs < 2:
         parser.error("--tokens must be >= 32 and --runs must be >= 2")
+    if args.draft_tokens < 1:
+        parser.error("--draft-tokens must be >= 1")
+    if args.draft_threads is not None and args.draft_threads < 1:
+        parser.error("--draft-threads must be >= 1")
+    if args.draft_threads is not None and not args.draft_model:
+        parser.error("--draft-threads requires --draft-model")
     candidates = (
         parse_thread_candidates(str(args.threads))
         if args.threads is not None
@@ -163,7 +193,10 @@ def main() -> None:
         parser.error("at least one ubatch candidate must be <= a batch candidate")
 
     result = run_benchmark(
-        args.model, candidates, args.tokens, args.runs, batches, ubatches
+        args.model, candidates, args.tokens, args.runs, batches, ubatches,
+        draft_model=args.draft_model,
+        draft_tokens=args.draft_tokens,
+        draft_threads=args.draft_threads,
     )
     rendered = json.dumps(result, indent=2, ensure_ascii=False)
     print(rendered)

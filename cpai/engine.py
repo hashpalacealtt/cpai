@@ -89,6 +89,9 @@ class LlamaCppEngine:
         context_size: int = 2048,
         port: int = 18080,
         startup_timeout: int = 900,
+        draft_model: str | None = None,
+        draft_tokens: int = 8,
+        draft_threads: int | None = None,
     ) -> None:
         if threads < 1:
             raise ValueError("threads must be at least 1")
@@ -96,12 +99,19 @@ class LlamaCppEngine:
             raise ValueError("threads_batch must be at least 1")
         if batch_size < 1 or ubatch_size < 1 or ubatch_size > batch_size:
             raise ValueError("require 1 <= ubatch_size <= batch_size")
+        if draft_tokens < 1:
+            raise ValueError("draft_tokens must be at least 1")
+        if draft_threads is not None and draft_threads < 1:
+            raise ValueError("draft_threads must be at least 1")
         self.model = model
         self.threads = threads
         self.threads_batch = threads_batch or threads
         self.batch_size = batch_size
         self.ubatch_size = ubatch_size
         self.context_size = context_size
+        self.draft_model = draft_model
+        self.draft_tokens = draft_tokens
+        self.draft_threads = draft_threads or max(1, threads // 2)
         self.port = self._free_port(port)
         self.startup_timeout = startup_timeout
         self.process: subprocess.Popen[str] | None = None
@@ -118,11 +128,7 @@ class LlamaCppEngine:
                 sock.bind(("127.0.0.1", 0))
                 return int(sock.getsockname()[1])
 
-    def start(self) -> None:
-        if self.process is not None:
-            return
-        executable = find_server()
-        self._log_file = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8")
+    def _build_command(self, executable: str) -> list[str]:
         command = [
             executable,
             "--host", "127.0.0.1",
@@ -136,6 +142,22 @@ class LlamaCppEngine:
             "--no-webui",
             "-hf", self.model,
         ]
+        if self.draft_model:
+            command.extend([
+                "--spec-type", "draft-simple",
+                "--spec-draft-hf", self.draft_model,
+                "--spec-draft-n-max", str(self.draft_tokens),
+                "--spec-draft-threads", str(self.draft_threads),
+                "--spec-draft-threads-batch", str(self.draft_threads),
+            ])
+        return command
+
+    def start(self) -> None:
+        if self.process is not None:
+            return
+        executable = find_server()
+        self._log_file = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8")
+        command = self._build_command(executable)
         server_env = os.environ.copy()
         server_env.setdefault("OMP_NUM_THREADS", str(max(self.threads, self.threads_batch)))
         server_env.setdefault("OMP_DYNAMIC", "FALSE")
