@@ -65,15 +65,26 @@ jobs:
           lscpu
           grep -m1 '^flags' /proc/cpuinfo || true
 
-      - name: Build llama.cpp with native CPU optimizations
+      - name: Fetch pinned AVX2 kernel candidate
+        run: |
+          git init /tmp/llama.cpp
+          git -C /tmp/llama.cpp remote add origin https://github.com/silicium369-spec/llama.cpp.git
+          git -C /tmp/llama.cpp fetch --depth=1 origin b77e97fcf3ab296391db149d9a38628913e181d6
+          git -C /tmp/llama.cpp checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/llama.cpp rev-parse HEAD)" = "b77e97fcf3ab296391db149d9a38628913e181d6"
+          echo "llama.cpp candidate: $(git -C /tmp/llama.cpp rev-parse HEAD)"
+
+      - name: Build llama.cpp with native AVX2 CPU kernels
         env:
           CCACHE_DIR: ~/.cache/ccache
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
         run: |
-          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
           cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
             -DGGML_NATIVE=ON \
+            -DGGML_AVX2=ON \
+            -DGGML_FMA=ON \
+            -DGGML_F16C=ON \
             -DGGML_OPENMP=ON \
             -DGGML_CURL=ON \
             -DCMAKE_BUILD_TYPE=Release \
@@ -83,7 +94,8 @@ jobs:
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-flto"
-          cmake --build /tmp/llama.cpp/build --config Release -j4 --target llama-server
+          cmake --build /tmp/llama.cpp/build --config Release -j4 --target llama-server test-quantize-fns test-backend-ops
+          ctest --test-dir /tmp/llama.cpp/build --output-on-failure -R 'test-quantize-fns|test-backend-ops'
           ccache --show-stats
 
       - name: Benchmark optimized Qwen CPU engine
@@ -97,6 +109,18 @@ jobs:
             --tokens 256 \
             --runs 3 \
             --output results/ubuntu-latest-qwen2.5-1.5b-q4km-40tuning.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path("results/ubuntu-latest-qwen2.5-1.5b-q4km-40tuning.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          data["engine_build"] = {
+              "repository": "https://github.com/silicium369-spec/llama.cpp",
+              "commit": "b77e97fcf3ab296391db149d9a38628913e181d6",
+              "optimization": "x86 AVX2 quantized dot-product kernels",
+          }
+          path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+          PY
 
       - name: Upload benchmark result
         if: always()
