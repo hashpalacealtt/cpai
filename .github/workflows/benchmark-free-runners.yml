@@ -1,0 +1,114 @@
+name: Cross-platform free CPU runner benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpai-cross-runner-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Ubuntu x64
+            runner: ubuntu-latest
+          - label: Ubuntu ARM64
+            runner: ubuntu-24.04-arm
+          - label: Windows x64
+            runner: windows-latest
+          - label: Windows ARM64
+            runner: windows-11-arm
+          - label: macOS Intel
+            runner: macos-15-intel
+          - label: macOS Apple Silicon M1
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build llama.cpp with native CPU optimizations
+        shell: bash
+        run: |
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_OPENMP=ON \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(python -c 'import os; print(os.cpu_count() or 2)')"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          binary = 'llama-server.exe' if os.name == 'nt' else 'llama-server'
+          matches = [p.resolve() for p in Path('llama.cpp/build').rglob(binary) if p.is_file()]
+          if not matches:
+              raise SystemExit(f'{binary} not found after build')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write(f'CPAI_LLAMA_SERVER={matches[0]}\n')
+          print(f'Using {matches[0]}')
+          PY
+
+      - name: Install cpai
+        shell: bash
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - name: Record runner and CPU identity
+        shell: bash
+        run: |
+          mkdir -p results
+          {
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "platform=$(python -c 'import platform; print(platform.platform())')"
+            echo "processor=$(python -c 'import platform; print(platform.processor())')"
+            if [ "$RUNNER_OS" = Linux ]; then lscpu; fi
+            if [ "$RUNNER_OS" = macOS ]; then sysctl -n machdep.cpu.brand_string; sysctl -n hw.ncpu; fi
+            if [ "$RUNNER_OS" = Windows ]; then powershell.exe -NoProfile -Command "(Get-CimInstance Win32_Processor).Name; (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"; fi
+            echo "model=Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M"
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+          } | tee results/environment.txt
+
+      - name: Run identical CPU throughput sweep
+        shell: bash
+        env:
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates 2,3,4 \
+            --threads-batch-candidates 2 \
+            --cpu-strict-candidates 0 \
+            --poll-candidates 0 \
+            --poll-batch-candidates 0,1 \
+            --speculative-candidates none \
+            --tokens 192 \
+            --runs 3 \
+            --batch-candidates 512 \
+            --ubatch-candidates 64 \
+            --output results/benchmark.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-cross-runner-${{ matrix.runner }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
