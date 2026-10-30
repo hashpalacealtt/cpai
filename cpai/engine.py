@@ -78,7 +78,7 @@ def extract_metrics(response: dict[str, Any]) -> dict[str, float | int]:
 
 
 class LlamaCppEngine:
-    """Manage llama-server with reusable prompt state and configurable CPU memory paths."""
+    """Manage llama-server with configurable CPU scheduling and memory paths."""
 
     def __init__(
         self,
@@ -99,6 +99,13 @@ class LlamaCppEngine:
         flash_attention: str = "auto",
         numa: str | None = None,
         mlock: bool = False,
+        cpu_strict: bool = False,
+        poll: int = 50,
+        speculative_type: str = "none",
+        speculative_tokens: int = 64,
+        ngram_match: int = 24,
+        ngram_min: int = 48,
+        ngram_max: int = 64,
     ) -> None:
         if threads < 1:
             raise ValueError("threads must be at least 1")
@@ -106,8 +113,8 @@ class LlamaCppEngine:
             raise ValueError("threads_batch must be at least 1")
         if batch_size < 1 or ubatch_size < 1 or ubatch_size > batch_size:
             raise ValueError("require 1 <= ubatch_size <= batch_size")
-        if draft_tokens < 1:
-            raise ValueError("draft_tokens must be at least 1")
+        if draft_tokens < 1 or speculative_tokens < 1:
+            raise ValueError("draft/speculative token counts must be at least 1")
         if draft_threads is not None and draft_threads < 1:
             raise ValueError("draft_threads must be at least 1")
         if cache_type_k not in _CACHE_TYPES or cache_type_v not in _CACHE_TYPES:
@@ -116,6 +123,14 @@ class LlamaCppEngine:
             raise ValueError("flash_attention must be auto, on, or off")
         if numa not in {None, "distribute", "isolate", "numactl"}:
             raise ValueError("numa must be distribute, isolate, numactl, or None")
+        if not 0 <= poll <= 100:
+            raise ValueError("poll must be between 0 and 100")
+        if speculative_type not in {"none", "ngram-mod"}:
+            raise ValueError("speculative_type must be none or ngram-mod")
+        if ngram_match < 1 or ngram_min < 1 or ngram_max < ngram_min:
+            raise ValueError("require 1 <= ngram_match and 1 <= ngram_min <= ngram_max")
+        if draft_model and speculative_type != "none":
+            raise ValueError("draft_model and ngram speculative decoding cannot be enabled together")
 
         self.model = model
         self.threads = threads
@@ -132,6 +147,13 @@ class LlamaCppEngine:
         self.flash_attention = flash_attention
         self.numa = numa
         self.mlock = mlock
+        self.cpu_strict = cpu_strict
+        self.poll = poll
+        self.speculative_type = speculative_type
+        self.speculative_tokens = speculative_tokens
+        self.ngram_match = ngram_match
+        self.ngram_min = ngram_min
+        self.ngram_max = ngram_max
         self.port = self._free_port(port)
         self.startup_timeout = startup_timeout
         self.process: subprocess.Popen[str] | None = None
@@ -162,6 +184,8 @@ class LlamaCppEngine:
             "--flash-attn", self.flash_attention,
             "--cache-type-k", self.cache_type_k,
             "--cache-type-v", self.cache_type_v,
+            "--cpu-strict", "1" if self.cpu_strict else "0",
+            "--poll", str(self.poll),
             "--no-webui",
             "-hf", self.model,
         ]
@@ -176,6 +200,14 @@ class LlamaCppEngine:
                 "--spec-draft-n-max", str(self.draft_tokens),
                 "--spec-draft-threads", str(self.draft_threads),
                 "--spec-draft-threads-batch", str(self.draft_threads),
+            ])
+        elif self.speculative_type == "ngram-mod":
+            command.extend([
+                "--spec-type", "ngram-mod",
+                "--spec-draft-n-max", str(self.speculative_tokens),
+                "--spec-ngram-mod-n-match", str(self.ngram_match),
+                "--spec-ngram-mod-n-min", str(self.ngram_min),
+                "--spec-ngram-mod-n-max", str(self.ngram_max),
             ])
         return command
 

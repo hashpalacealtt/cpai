@@ -26,7 +26,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   benchmark:
-    name: CPU benchmark (llama.cpp + Qwen2.5 1.5B Q4_K_M)
+    name: CPU benchmark (scheduling + ngram speculative sweep)
     if: ${{ inputs.run_benchmark }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -37,9 +37,6 @@ jobs:
           repository: ggml-org/llama.cpp
           ref: master
           path: llama.cpp
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
       - name: Configure native CPU backend
         run: cmake -S llama.cpp -B llama.cpp/build -DGGML_NATIVE=ON -DGGML_OPENMP=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build llama-server
@@ -52,15 +49,22 @@ jobs:
           {
             echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
             echo "runner=$(uname -a)"
-            echo "cpu=$(lscpu | grep -E 'Model name|CPU\(s\)|Core\(s\) per socket|Thread\(s\) per core')"
+            echo "cpu=$(lscpu | grep -E 'Model name|CPU\\(s\\)|Core\\(s\\) per socket|Thread\\(s\\) per core|NUMA node')"
+            echo "affinity=$(taskset -pc $$)"
+            echo "cgroup_cpu_max=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || true)"
+            echo "cgroup_cpuset=$(cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null || true)"
           } | tee results/environment.txt
-      - name: Run benchmark
+      - name: Run CPU scheduling and speculative benchmark
         env:
           CPAI_LLAMA_SERVER: ${{ github.workspace }}/llama.cpp/build/bin/llama-server
         run: >-
           python -m cpai.benchmark
-          --thread-candidates 2,4
-          --tokens 128
+          --thread-candidates 1,2,3,4
+          --cpu-strict-candidates 0,1
+          --poll-candidates 0,50,100
+          --speculative-candidates none,ngram-mod
+          --speculative-tokens 64
+          --tokens 256
           --runs 2
           --batch-candidates 512
           --ubatch-candidates 128
