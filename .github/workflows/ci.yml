@@ -27,7 +27,7 @@ jobs:
   test-and-benchmark:
     name: CPU inference / AVX2 thread validation
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -129,6 +129,35 @@ jobs:
               --thread-candidates 1,2,4 --batch-candidates 256 --ubatch-candidates 256 \
               --tokens 256 --runs 3 --output results/avx2-kernel-candidate.json
 
+      - name: Build and benchmark AVX-512 VNNI when supported
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          FLAGS="$(grep -m1 '^flags' /proc/cpuinfo)"
+          if [[ " $FLAGS " != *" avx512f "* || " $FLAGS " != *" avx512_vnni "* ]]; then
+            echo "Skipped: runner does not expose AVX-512F + AVX-512 VNNI." | tee results/avx512-skipped.txt
+            exit 0
+          fi
+          cmake -S /tmp/llama-baseline -B /tmp/llama-avx512/build \
+            -DGGML_NATIVE=ON -DGGML_AVX512=ON -DGGML_AVX512_VNNI=ON \
+            -DGGML_AVX512_VBMI=ON -DGGML_AVX512_BF16=ON \
+            -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON \
+            -DGGML_OPENMP=ON -DGGML_CURL=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto"
+          cmake --build /tmp/llama-avx512/build --config Release -j4 --target llama-server test-backend-ops
+          /tmp/llama-avx512/build/bin/test-backend-ops -b CPU -j 4 -o MUL_MAT
+          CPAI_LLAMA_SERVER=/tmp/llama-avx512/build/bin/llama-server \
+            python -m cpai.benchmark \
+              --thread-candidates 1,2,4 --batch-candidates 256 --ubatch-candidates 256 \
+              --tokens 256 --runs 3 --output results/avx512-vnni.json
+
       - name: Compare identical-hardware benchmark results
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -173,6 +202,21 @@ jobs:
           Path("results/ab-comparison.json").write_text(
               json.dumps(comparison, indent=2) + "\n", encoding="utf-8"
           )
+          avx512_path = Path("results/avx512-vnni.json")
+          if avx512_path.exists():
+              avx512 = json.loads(avx512_path.read_text(encoding="utf-8"))
+              avx512_tps = median(avx512)
+              comparison["avx512_vnni_best"] = avx512["best_configuration"]
+              comparison["avx512_vnni_median_tok_s"] = avx512_tps
+              comparison["avx512_vnni_delta_vs_upstream_percent"] = round(
+                  (avx512_tps / base_tps - 1.0) * 100.0, 2
+              )
+              comparison["avx512_vnni_delta_vs_avx2_percent"] = round(
+                  (avx512_tps / candidate_tps - 1.0) * 100.0, 2
+              )
+          else:
+              comparison["avx512_vnni"] = "skipped: unsupported CPU flags"
+
           print(json.dumps(comparison, indent=2))
           PY
           ccache --show-stats
