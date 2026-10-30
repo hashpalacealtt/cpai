@@ -27,7 +27,7 @@ jobs:
   test-and-benchmark:
     name: CPU inference / AVX2 thread validation
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -158,6 +158,24 @@ jobs:
               --thread-candidates 1,2,4 --batch-candidates 256 --ubatch-candidates 256 \
               --tokens 256 --runs 3 --output results/avx512-vnni.json
 
+      - name: Benchmark 1.5B low-bit and 0.5B speed profiles
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
+        run: |
+          SERVER=/tmp/llama-baseline/build/bin/llama-server
+          if [[ -x /tmp/llama-avx512/build/bin/llama-server ]]; then
+            SERVER=/tmp/llama-avx512/build/bin/llama-server
+          fi
+          CPAI_LLAMA_SERVER="$SERVER" python -m cpai.benchmark \
+            --model Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q2_K \
+            --thread-candidates 1,2,4 --batch-candidates 256 --ubatch-candidates 256 \
+            --tokens 256 --runs 3 --output results/qwen-1.5b-q2k.json
+          CPAI_LLAMA_SERVER="$SERVER" python -m cpai.benchmark \
+            --model Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M \
+            --thread-candidates 1,2,4 --batch-candidates 256 --ubatch-candidates 256 \
+            --tokens 256 --runs 3 --output results/qwen-0.5b-q4km.json
+
       - name: Compare identical-hardware benchmark results
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -216,6 +234,15 @@ jobs:
               )
           else:
               comparison["avx512_vnni"] = "skipped: unsupported CPU flags"
+
+          for label, path in (
+              ("qwen_1_5b_q2k", Path("results/qwen-1.5b-q2k.json")),
+              ("qwen_0_5b_q4km", Path("results/qwen-0.5b-q4km.json")),
+          ):
+              if path.exists():
+                  result = json.loads(path.read_text(encoding="utf-8"))
+                  comparison[f"{label}_best"] = result["best_configuration"]
+                  comparison[f"{label}_median_tok_s"] = median(result)
 
           print(json.dumps(comparison, indent=2))
           PY
