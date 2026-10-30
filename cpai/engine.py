@@ -101,7 +101,7 @@ class LlamaCppEngine:
         mlock: bool = False,
         cpu_strict: bool = True,
         poll: int = 100,
-        speculative_type: str = "ngram-mod",
+        speculative_type: str = "none",
         speculative_tokens: int = 64,
         ngram_match: int = 24,
         ngram_min: int = 48,

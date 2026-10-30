@@ -47,6 +47,7 @@ def cpu_description() -> str:
 def run_configuration(
     model: str, threads: int, tokens: int, runs: int,
     batch_size: int, ubatch_size: int,
+    threads_batch: int | None = None,
     cpu_strict: bool = False, poll: int = 50,
     speculative_type: str = "none", speculative_tokens: int = 64,
     draft_model: str | None = None, draft_tokens: int = 8,
@@ -54,7 +55,7 @@ def run_configuration(
     engine = LlamaCppEngine(
         model=model,
         threads=threads,
-        threads_batch=threads,
+        threads_batch=threads_batch or threads,
         batch_size=batch_size,
         ubatch_size=ubatch_size,
         cpu_strict=cpu_strict,
@@ -81,7 +82,7 @@ def run_configuration(
     prompt_counts = [int(item["prompt_tokens"]) for item in results]
     return {
         "threads": threads,
-        "threads_batch": threads,
+        "threads_batch": threads_batch or threads,
         "batch_size": batch_size,
         "ubatch_size": ubatch_size,
         "cpu_strict": cpu_strict,
@@ -108,12 +109,14 @@ def run_benchmark(
     cpu_strict_candidates: list[int], poll_candidates: list[int],
     speculative_candidates: list[str], speculative_tokens: int = 64,
     draft_model: str | None = None, draft_token_candidates: list[int] | None = None,
+    threads_batch_candidates: list[int] | None = None,
 ) -> dict[str, Any]:
     combinations = [
-        (threads, batch, ubatch, bool(strict), poll, speculative)
-        for threads, batch, ubatch, strict, poll, speculative in itertools.product(
-            thread_candidates, batch_candidates, ubatch_candidates,
-            cpu_strict_candidates, poll_candidates, speculative_candidates,
+        (threads, threads_batch, batch, ubatch, bool(strict), poll, speculative)
+        for threads, threads_batch, batch, ubatch, strict, poll, speculative in itertools.product(
+            thread_candidates, threads_batch_candidates or thread_candidates,
+            batch_candidates, ubatch_candidates, cpu_strict_candidates,
+            poll_candidates, speculative_candidates,
         )
         if ubatch <= batch
     ]
@@ -125,7 +128,7 @@ def run_benchmark(
     configurations = [
         run_configuration(
             model, threads, tokens, runs, batch, ubatch,
-            cpu_strict=strict, poll=poll,
+            threads_batch=threads_batch, cpu_strict=strict, poll=poll,
             speculative_type=speculative,
             speculative_tokens=speculative_tokens,
             draft_model=draft_model if draft_count is not None else None,
@@ -139,7 +142,7 @@ def run_benchmark(
         reverse=True,
     )
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "model": model,
         "backend": "llama.cpp",
         "device": "CPU",
@@ -149,6 +152,7 @@ def run_benchmark(
         "runs_per_configuration": runs,
         "prompt_cache_disabled_for_measurement": True,
         "tested_thread_counts": thread_candidates,
+        "tested_threads_batch_counts": threads_batch_candidates or thread_candidates,
         "tested_cpu_strict": cpu_strict_candidates,
         "tested_poll_levels": poll_candidates,
         "tested_speculative_types": speculative_candidates,
@@ -195,6 +199,8 @@ def main() -> None:
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--thread-candidates", default="1,2,3,4")
+    parser.add_argument("--threads-batch-candidates", default=None,
+                        help="Independent thread counts for prompt/batch processing (default: same as generation)")
     parser.add_argument("--cpu-strict-candidates", default="0,1")
     parser.add_argument("--poll-candidates", default="0,50,100")
     parser.add_argument("--speculative-candidates", default="none,ngram-mod")
@@ -214,6 +220,10 @@ def main() -> None:
         parser.error("--speculative-tokens must be >= 1")
     draft_tokens = parse_size_candidates(args.draft_token_candidates, "--draft-token-candidates")
     threads = parse_thread_candidates(args.thread_candidates)
+    threads_batch = (
+        parse_thread_candidates(args.threads_batch_candidates)
+        if args.threads_batch_candidates else threads
+    )
     strict = parse_size_candidates(args.cpu_strict_candidates, "--cpu-strict-candidates", minimum=0)
     if any(item not in {0, 1} for item in strict):
         parser.error("--cpu-strict-candidates values must be 0 or 1")
@@ -231,7 +241,7 @@ def main() -> None:
     result = run_benchmark(
         args.model, threads, args.tokens, args.runs, batches, ubatches,
         strict, polls, speculative, args.speculative_tokens,
-        args.draft_model, draft_tokens,
+        args.draft_model, draft_tokens, threads_batch,
     )
     rendered = json.dumps(result, indent=2, ensure_ascii=False)
     print(rendered)

@@ -64,3 +64,12 @@ Each configuration records every run plus median/min/max generation throughput a
 ## License
 
 cpai source code is licensed under MIT. Qwen model weights have their own license; see the [official model card](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) and [GGUF repository](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF).
+
+
+## CPU tuning notes (Qwen3.5 2B Q4_K_M)
+
+The October 2026 EPYC 7763 run measured a best median of 22.402 generated tokens/s with 4 generation threads, strict CPU placement, polling at 100, and speculative decoding disabled. `ngram-mod` was slower in this workload, so it is no longer the engine default. These are measurements on a 4-vCPU shared runner, not universal defaults.
+
+The benchmark now tests exactly eight focused configurations. Generation remains at the measured 4-thread winner while prompt/batch threads (2 or 4), strict CPU placement (off/on), and polling (50/100) are varied independently. llama.cpp exposes `--threads-batch` separately from generation threads, so this isolates prompt-processing tuning without multiplying the entire search space.
+
+Builds use Release mode, native CPU instruction selection (`GGML_NATIVE=ON`), and OpenMP (`GGML_OPENMP=ON`). The runtime sets a fixed OpenMP thread count and core binding for reproducibility. Results should be remeasured on each CPU model.

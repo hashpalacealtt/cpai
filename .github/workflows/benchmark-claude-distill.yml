@@ -41,7 +41,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build llama.cpp/build --config Release --target llama-server -j2
+          cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(nproc)"
           ccache --show-stats
 
       - name: Install cpai
@@ -61,14 +61,19 @@ jobs:
 
       - name: Benchmark optimized CPU configurations
         env:
+          OMP_NUM_THREADS: 4
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
           CPAI_LLAMA_SERVER: ${{ github.workspace }}/llama.cpp/build/bin/llama-server
         run: |
           python -m cpai.benchmark \
             --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
-            --thread-candidates 1,2,3,4 \
+            --thread-candidates 4 \
+            --threads-batch-candidates 2,4 \
             --cpu-strict-candidates 0,1 \
-            --poll-candidates 0,50,100 \
-            --speculative-candidates none,ngram-mod \
+            --poll-candidates 50,100 \
+            --speculative-candidates none \
             --tokens 128 \
             --runs 2 \
             --batch-candidates 512 \
