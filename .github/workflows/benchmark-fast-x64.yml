@@ -1,7 +1,6 @@
 name: Fast x64 CPU benchmark
 
-on:
-  workflow_dispatch:
+on: workflow_dispatch
 
 permissions:
   contents: read
@@ -17,18 +16,14 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/checkout@v4
         with:
           repository: ggml-org/llama.cpp
           ref: master
           path: llama.cpp
-
       - name: Resolve llama.cpp revision
         id: llama
-        shell: bash
-        run: echo "sha=$(git -C llama.cpp rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
+        run: echo \"sha=$(git -C llama.cpp rev-parse HEAD)\" >> \"$GITHUB_OUTPUT\"
       - name: Restore llama.cpp build cache
         uses: actions/cache@v4
         with:
@@ -36,110 +31,33 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-llama-${{ steps.llama.outputs.sha }}-native-openmp-v1
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-llama-
-
-      - name: Restore model download cache
+      - name: Restore model cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/llama.cpp
-            ~/.cache/huggingface
+          path: ~/.cache/llama.cpp
           key: ${{ runner.os }}-${{ runner.arch }}-cpai-model-qwen35-2b-q4km-v1
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cpai-model-
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: \"3.12\"
           cache: pip
-
-      - name: Build llama.cpp (native x64)
+      - name: Build llama.cpp
         shell: bash
         run: |
-          cmake -S llama.cpp -B llama.cpp/build \
-            -DGGML_NATIVE=ON \
-            -DGGML_OPENMP=ON \
-            -DLLAMA_CURL=OFF \
-            -DCMAKE_BUILD_TYPE=Release
+          cmake -S llama.cpp -B llama.cpp/build -DGGML_NATIVE=ON -DGGML_OPENMP=ON -DLLAMA_CURL=OFF -DCMAKE_BUILD_TYPE=Release
           cmake --build llama.cpp/build --config Release --target llama-server --parallel 4
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          matches = [p.resolve() for p in Path("llama.cpp/build").rglob("llama-server") if p.is_file()]
-          if not matches:
-              raise SystemExit("llama-server not found after build")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
-              f.write(f"CPAI_LLAMA_SERVER={matches[0]}\n")
-          print(f"Using {matches[0]}")
-          PY
-
+          echo \"CPAI_LLAMA_SERVER=$(find llama.cpp/build -type f -name llama-server | head -n 1)\" >> \"$GITHUB_ENV\"
       - name: Install cpai
         run: python -m pip install --upgrade pip && python -m pip install -e .
-
       - name: Record runner details
-        shell: bash
-        run: |
-          mkdir -p results
-          {
-            echo "runner_os=$RUNNER_OS"
-            echo "runner_arch=$RUNNER_ARCH"
-            echo "platform=$(python -c 'import platform; print(platform.platform())')"
-            echo "processor=$(python -c 'import platform; print(platform.processor())')"
-            lscpu
-            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
-          } | tee results/environment.txt
-
-      - name: Run short, repeatable x64 sweep (hard limit: 5 minutes)
+        run: mkdir -p results && lscpu | tee results/environment.txt
+      - name: Run quick sweep (maximum 5 minutes)
         shell: bash
         env:
-          OMP_DYNAMIC: "FALSE"
+          OMP_DYNAMIC: \"FALSE\"
           OMP_PROC_BIND: close
           OMP_PLACES: cores
-          HF_HUB_DISABLE_TELEMETRY: "1"
         run: |
-          timeout --signal=TERM --kill-after=10s 300s python -m cpai.benchmark \
-            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
-            --thread-candidates 3,4 \
-            --threads-batch-candidates 2 \
-            --cpu-strict-candidates 0 \
-            --poll-candidates 0 \
-            --poll-batch-candidates 0,1 \
-            --speculative-candidates none \
-            --tokens 96 \
-            --runs 2 \
-            --batch-candidates 512 \
-            --ubatch-candidates 64 \
-            --output results/benchmark.json
-
-      - name: Publish benchmark summary
-        if: always()
-        shell: bash
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          path = Path("results/benchmark.json")
-          if not path.exists():
-              print("No benchmark JSON was produced.")
-              raise SystemExit(0)
-          data = json.loads(path.read_text(encoding="utf-8"))
-          best = data.get("best_configuration", {})
-          summary = best.get("summary", {})
-          lines = [
-              "## Fast x64 CPU benchmark",
-              "",
-              f"- CPU: {data.get('cpu', 'unknown')}",
-              f"- Logical CPUs: {data.get('logical_cpus', 'unknown')}",
-              f"- Best median: **{summary.get('generation_tokens_per_second_median', 'n/a')} tok/s**",
-              f"- Threads: {best.get('threads', 'n/a')}",
-              f"- Batch threads: {best.get('threads_batch', 'n/a')}",
-              f"- Batch polling: {best.get('poll_batch', 'n/a')}",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
-              f.write("\n".join(lines) + "\n")
-          print("\n".join(lines))
-          PY
-
+          timeout --signal=TERM --kill-after=10s 300s python -m cpai.benchmark --model \"Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M\" --thread-candidates 3,4 --threads-batch-candidates 2 --cpu-strict-candidates 0 --poll-candidates 0 --poll-batch-candidates 0,1 --speculative-candidates none --tokens 96 --runs 2 --batch-candidates 512 --ubatch-candidates 64 --output results/benchmark.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
