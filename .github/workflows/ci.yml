@@ -2,13 +2,19 @@ name: CPU inference checks
 
 on:
   workflow_dispatch:
+    inputs:
+      run_benchmark:
+        description: "Build llama.cpp and run the CPU benchmark"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   unit-tests:
-    name: Fast unit tests (no model download, no benchmark)
+    name: Fast unit tests (no model download)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -16,5 +22,53 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Run unit tests only
+      - name: Run unit tests
         run: python -m unittest discover -s tests -v
+
+  benchmark:
+    name: CPU benchmark (llama.cpp + Qwen2.5 1.5B Q4_K_M)
+    if: ${{ inputs.run_benchmark }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Configure native CPU backend
+        run: cmake -S llama.cpp -B llama.cpp/build -DGGML_NATIVE=ON -DGGML_OPENMP=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build llama-server
+        run: cmake --build llama.cpp/build --config Release --target llama-server -j2
+      - name: Install cpai
+        run: python -m pip install -e .
+      - name: Record runner and backend revisions
+        run: |
+          mkdir -p results
+          {
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+            echo "runner=$(uname -a)"
+            echo "cpu=$(lscpu | grep -E 'Model name|CPU\(s\)|Core\(s\) per socket|Thread\(s\) per core')"
+          } | tee results/environment.txt
+      - name: Run benchmark
+        env:
+          CPAI_LLAMA_SERVER: ${{ github.workspace }}/llama.cpp/build/bin/llama-server
+        run: >-
+          python -m cpai.benchmark
+          --thread-candidates 2,4
+          --tokens 128
+          --runs 2
+          --batch-candidates 512
+          --ubatch-candidates 128
+          --output results/benchmark.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-cpu-benchmark
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30

@@ -27,14 +27,14 @@ The default model is `Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M`. The first run dow
 ## Tuning
 
 ```bash
-# Compare 1, 2, 3 and 4 CPU threads
+# Compare CPU thread counts
 python -m cpai.benchmark --thread-candidates 1,2,3,4
 
 # Benchmark one specific configuration
 python -m cpai.benchmark --threads 4 --tokens 256 --runs 5
 
-# Change prompt-processing batch sizes
-python -m cpai.benchmark --threads 4 --batch-size 512 --ubatch-size 128
+# Tune prompt-processing batch sizes
+python -m cpai.benchmark --threads 4 --batch-candidates 512 --ubatch-candidates 128
 ```
 
 The benchmark warms up each configuration, measures repeated completions, and ranks configurations by median generation tokens/second. It does not assume that more threads are always faster.
@@ -53,11 +53,13 @@ cmake --build llama.cpp/build -j2 --target llama-server
 
 Do not distribute a `GGML_NATIVE=ON` binary to machines with different CPU capabilities. For portable builds, use `GGML_NATIVE=OFF`.
 
+## GitHub Actions
+
+Run **CPU inference checks** manually from the Actions tab. Enable the `run_benchmark` input to additionally build llama.cpp, download the reference model, and run a short CPU benchmark. Benchmark JSON and runner metadata are uploaded as the `cpai-cpu-benchmark` artifact. Benchmark jobs are opt-in and never run on ordinary pushes.
+
 ## Metrics and fairness
 
 Each configuration records every run plus median/min/max generation throughput and median prompt throughput. Results are specific to the reported runner and its CPU allocation. Compare results only when model revision, quantization, prompt, token limit, backend revision, and hardware allocation match.
-
-GitHub Actions runs bounded tests on pushes, pull requests and manual dispatches. It does not run scheduled jobs or unrelated workloads.
 
 ## License
 
