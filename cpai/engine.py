@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M"
+_CACHE_TYPES = {"f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}
 
 
 class EngineError(RuntimeError):
@@ -77,7 +78,7 @@ def extract_metrics(response: dict[str, Any]) -> dict[str, float | int]:
 
 
 class LlamaCppEngine:
-    """Manage a local llama-server process and expose text completion."""
+    """Manage llama-server with reusable prompt state and configurable CPU memory paths."""
 
     def __init__(
         self,
@@ -92,6 +93,12 @@ class LlamaCppEngine:
         draft_model: str | None = None,
         draft_tokens: int = 8,
         draft_threads: int | None = None,
+        cache_prompt: bool = True,
+        cache_type_k: str = "f16",
+        cache_type_v: str = "f16",
+        flash_attention: str = "auto",
+        numa: str | None = None,
+        mlock: bool = False,
     ) -> None:
         if threads < 1:
             raise ValueError("threads must be at least 1")
@@ -103,6 +110,13 @@ class LlamaCppEngine:
             raise ValueError("draft_tokens must be at least 1")
         if draft_threads is not None and draft_threads < 1:
             raise ValueError("draft_threads must be at least 1")
+        if cache_type_k not in _CACHE_TYPES or cache_type_v not in _CACHE_TYPES:
+            raise ValueError(f"KV cache types must be one of: {', '.join(sorted(_CACHE_TYPES))}")
+        if flash_attention not in {"auto", "on", "off"}:
+            raise ValueError("flash_attention must be auto, on, or off")
+        if numa not in {None, "distribute", "isolate", "numactl"}:
+            raise ValueError("numa must be distribute, isolate, numactl, or None")
+
         self.model = model
         self.threads = threads
         self.threads_batch = threads_batch or threads
@@ -112,6 +126,12 @@ class LlamaCppEngine:
         self.draft_model = draft_model
         self.draft_tokens = draft_tokens
         self.draft_threads = draft_threads or max(1, threads // 2)
+        self.cache_prompt = cache_prompt
+        self.cache_type_k = cache_type_k
+        self.cache_type_v = cache_type_v
+        self.flash_attention = flash_attention
+        self.numa = numa
+        self.mlock = mlock
         self.port = self._free_port(port)
         self.startup_timeout = startup_timeout
         self.process: subprocess.Popen[str] | None = None
@@ -139,9 +159,16 @@ class LlamaCppEngine:
             "--ubatch-size", str(self.ubatch_size),
             "--n-gpu-layers", "0",
             "--ctx-size", str(self.context_size),
+            "--flash-attn", self.flash_attention,
+            "--cache-type-k", self.cache_type_k,
+            "--cache-type-v", self.cache_type_v,
             "--no-webui",
             "-hf", self.model,
         ]
+        if self.numa:
+            command.extend(["--numa", self.numa])
+        if self.mlock:
+            command.append("--mlock")
         if self.draft_model:
             command.extend([
                 "--spec-type", "draft-simple",
@@ -173,16 +200,17 @@ class LlamaCppEngine:
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
-                raise EngineError(f"llama-server exited during startup. Logs:\\n{self.logs()}")
+                raise EngineError(f"llama-server exited during startup. Logs:\n{self.logs()}")
             try:
                 _request_json(f"{self.base_url}/health", timeout=3)
                 return
             except EngineError:
                 time.sleep(1)
-        raise EngineError(f"Timed out waiting for llama-server. Logs:\\n{self.logs()}")
+        raise EngineError(f"Timed out waiting for llama-server. Logs:\n{self.logs()}")
 
     def complete(
-        self, prompt: str, max_tokens: int = 128, *, ignore_eos: bool = False
+        self, prompt: str, max_tokens: int = 128, *, ignore_eos: bool = False,
+        cache_prompt: bool | None = None,
     ) -> dict[str, Any]:
         if self.process is None or self.process.poll() is not None:
             raise EngineError("Engine is not running; call start() first.")
@@ -192,7 +220,7 @@ class LlamaCppEngine:
                 "prompt": prompt,
                 "n_predict": max_tokens,
                 "temperature": 0.0,
-                "cache_prompt": False,
+                "cache_prompt": self.cache_prompt if cache_prompt is None else cache_prompt,
                 "ignore_eos": ignore_eos,
                 "stop": [],
             },
