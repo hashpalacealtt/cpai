@@ -1,7 +1,8 @@
 import unittest
+from unittest.mock import Mock, patch
 
 from cpai.benchmark import parse_size_candidates, parse_thread_candidates
-from cpai.engine import EngineError, extract_metrics
+from cpai.engine import EngineError, LlamaCppEngine, extract_metrics
 
 
 class MetricsTests(unittest.TestCase):
@@ -49,6 +50,39 @@ class MetricsTests(unittest.TestCase):
     def test_size_candidates_reject_non_positive_values(self):
         with self.assertRaises(Exception):
             parse_size_candidates("0,128", "ubatch")
+
+
+class EngineRequestTests(unittest.TestCase):
+    def test_completion_can_ignore_eos_for_fixed_length_benchmarks(self):
+        engine = LlamaCppEngine(port=0)
+        process = Mock()
+        process.poll.return_value = None
+        engine.process = process
+        try:
+            with patch("cpai.engine._request_json", return_value={"content": "ok"}) as request:
+                result = engine.complete("benchmark prompt", max_tokens=256, ignore_eos=True)
+            self.assertEqual(result["content"], "ok")
+            args, kwargs = request.call_args
+            self.assertEqual(args[0], f"{engine.base_url}/completion")
+            self.assertEqual(args[1]["n_predict"], 256)
+            self.assertTrue(args[1]["ignore_eos"])
+            self.assertEqual(args[1]["temperature"], 0.0)
+            self.assertFalse(args[1]["cache_prompt"])
+            self.assertEqual(kwargs["timeout"], 600)
+        finally:
+            engine.process = None
+
+    def test_completion_keeps_eos_enabled_by_default(self):
+        engine = LlamaCppEngine(port=0)
+        process = Mock()
+        process.poll.return_value = None
+        engine.process = process
+        try:
+            with patch("cpai.engine._request_json", return_value={"content": "ok"}) as request:
+                engine.complete("normal prompt")
+            self.assertFalse(request.call_args.args[1]["ignore_eos"])
+        finally:
+            engine.process = None
 
 
 if __name__ == "__main__":

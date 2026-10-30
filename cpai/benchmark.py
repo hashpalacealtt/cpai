@@ -56,9 +56,9 @@ def run_configuration(
     results: list[dict[str, float | int]] = []
     try:
         with engine:
-            engine.complete(PROMPT, max_tokens=16)
+            engine.complete(PROMPT, max_tokens=16, ignore_eos=True)
             for _ in range(runs):
-                response = engine.complete(PROMPT, max_tokens=tokens)
+                response = engine.complete(PROMPT, max_tokens=tokens, ignore_eos=True)
                 results.append(extract_metrics(response))
     finally:
         engine.close()

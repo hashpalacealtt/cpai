@@ -159,7 +159,9 @@ class LlamaCppEngine:
                 time.sleep(1)
         raise EngineError(f"Timed out waiting for llama-server. Logs:\\n{self.logs()}")
 
-    def complete(self, prompt: str, max_tokens: int = 128) -> dict[str, Any]:
+    def complete(
+        self, prompt: str, max_tokens: int = 128, *, ignore_eos: bool = False
+    ) -> dict[str, Any]:
         if self.process is None or self.process.poll() is not None:
             raise EngineError("Engine is not running; call start() first.")
         return _request_json(
@@ -169,6 +171,7 @@ class LlamaCppEngine:
                 "n_predict": max_tokens,
                 "temperature": 0.0,
                 "cache_prompt": False,
+                "ignore_eos": ignore_eos,
                 "stop": [],
             },
             timeout=600,

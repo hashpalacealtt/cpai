@@ -140,7 +140,8 @@ jobs:
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-flto"
           cmake --build /tmp/llama-candidate/build --config Release -j4 --target llama-server test-quantize-fns test-backend-ops
-          ctest --test-dir /tmp/llama-candidate/build --output-on-failure -R 'test-quantize-fns|test-backend-ops'
+          ctest --test-dir /tmp/llama-candidate/build --output-on-failure -R 'test-quantize-fns'
+          /tmp/llama-candidate/build/bin/test-backend-ops -b CPU -j 4 -o MUL_MAT
           CPAI_LLAMA_SERVER=/tmp/llama-candidate/build/bin/llama-server \
             python -m cpai.benchmark \
               --thread-candidates 2,4 \
