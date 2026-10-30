@@ -1,6 +1,6 @@
 name: Fast x64 CPU benchmark
 
-on:
+"on":
   workflow_dispatch:
 
 permissions:
