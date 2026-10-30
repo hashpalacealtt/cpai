@@ -43,7 +43,22 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libcurl4-openssl-dev
+          sudo apt-get install -y build-essential cmake ccache libcurl4-openssl-dev
+
+      - name: Restore llama.cpp compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ${{ runner.os }}-${{ runner.arch }}-llama-cpp-ccache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-llama-cpp-ccache-
+
+      - name: Configure compiler cache
+        run: |
+          mkdir -p ~/.cache/ccache
+          ccache --set-config=max_size=2G
+          ccache --set-config=compiler_check=content
+          ccache --zero-stats
 
       - name: Show runner CPU capabilities
         run: |
@@ -51,6 +66,10 @@ jobs:
           grep -m1 '^flags' /proc/cpuinfo || true
 
       - name: Build llama.cpp with native CPU optimizations
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
         run: |
           git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /tmp/llama.cpp
           cmake -S /tmp/llama.cpp -B /tmp/llama.cpp/build \
@@ -59,10 +78,13 @@ jobs:
             -DGGML_CURL=ON \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fomit-frame-pointer" \
             -DCMAKE_EXE_LINKER_FLAGS="-flto"
           cmake --build /tmp/llama.cpp/build --config Release -j4 --target llama-server
+          ccache --show-stats
 
       - name: Benchmark optimized Qwen CPU engine
         env:
