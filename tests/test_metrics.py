@@ -54,6 +54,24 @@ class MetricsTests(unittest.TestCase):
 
     @patch("cpai.benchmark.cpu_description", return_value="test cpu")
     @patch("cpai.benchmark.run_configuration")
+    def test_poll_batch_candidates_are_swept_independently(self, run_config, _cpu):
+        run_config.side_effect = lambda *args, **kwargs: {
+            "poll_batch": kwargs.get("poll_batch"),
+            "summary": {"generation_tokens_per_second_median": 20.0},
+        }
+        report = run_benchmark(
+            "target", [4], 64, 2, [512], [128], [0], [0], ["none"],
+            threads_batch_candidates=[2], poll_batch_candidates=[0, 1],
+        )
+        self.assertEqual(run_config.call_count, 2)
+        self.assertEqual(report["tested_poll_batch"], [0, 1])
+        self.assertEqual(
+            [call.kwargs["poll_batch"] for call in run_config.call_args_list],
+            [False, True],
+        )
+
+    @patch("cpai.benchmark.cpu_description", return_value="test cpu")
+    @patch("cpai.benchmark.run_configuration")
     def test_draft_sweep_includes_baseline_and_each_draft_length(self, run_config, _cpu):
         def result(*args, **kwargs):
             count = kwargs.get("draft_tokens") if kwargs.get("draft_model") else 0
@@ -107,6 +125,7 @@ class EngineCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--cache-type-k") + 1], "f16")
         self.assertEqual(command[command.index("--cpu-strict") + 1], "0")
         self.assertEqual(command[command.index("--poll") + 1], "100")
+        self.assertNotIn("--poll-batch", command)
         self.assertEqual(engine.speculative_type, "none")
         self.assertNotIn("--spec-type", command)
         self.assertNotIn("--mlock", command)
@@ -116,6 +135,12 @@ class EngineCommandTests(unittest.TestCase):
         command = engine._build_command("llama-server")
         self.assertEqual(command[command.index("--cpu-strict") + 1], "1")
         self.assertEqual(command[command.index("--poll") + 1], "0")
+
+    def test_batch_polling_is_independently_configurable(self):
+        engine = LlamaCppEngine(port=0, poll=0, poll_batch=True)
+        command = engine._build_command("llama-server")
+        self.assertEqual(command[command.index("--poll") + 1], "0")
+        self.assertEqual(command[command.index("--poll-batch") + 1], "1")
 
     def test_optional_memory_flags(self):
         engine = LlamaCppEngine(

@@ -101,6 +101,7 @@ class LlamaCppEngine:
         mlock: bool = False,
         cpu_strict: bool = False,
         poll: int = 100,
+        poll_batch: bool | None = None,
         speculative_type: str = "none",
         speculative_tokens: int = 64,
         ngram_match: int = 24,
@@ -125,6 +126,8 @@ class LlamaCppEngine:
             raise ValueError("numa must be distribute, isolate, numactl, or None")
         if not 0 <= poll <= 100:
             raise ValueError("poll must be between 0 and 100")
+        if poll_batch is not None and not isinstance(poll_batch, bool):
+            raise ValueError("poll_batch must be True, False, or None")
         if speculative_type not in {"none", "ngram-mod"}:
             raise ValueError("speculative_type must be none or ngram-mod")
         if ngram_match < 1 or ngram_min < 1 or ngram_max < ngram_min:
@@ -149,6 +152,7 @@ class LlamaCppEngine:
         self.mlock = mlock
         self.cpu_strict = cpu_strict
         self.poll = poll
+        self.poll_batch = poll_batch
         self.speculative_type = speculative_type
         self.speculative_tokens = speculative_tokens
         self.ngram_match = ngram_match
@@ -189,6 +193,8 @@ class LlamaCppEngine:
             "--no-webui",
             "-hf", self.model,
         ]
+        if self.poll_batch is not None:
+            command.extend(["--poll-batch", "1" if self.poll_batch else "0"])
         if self.numa:
             command.extend(["--numa", self.numa])
         if self.mlock:
