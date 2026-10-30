@@ -25,9 +25,9 @@ concurrency:
 
 jobs:
   test-and-benchmark:
-    name: CPU inference / controlled AVX2 A-B
+    name: CPU inference / AVX2 + PGO experiment
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -151,13 +151,85 @@ jobs:
               --runs 3 \
               --output results/avx2-kernel-candidate.json
 
+      - name: Train and evaluate profile-guided AVX2 build
+        id: pgo
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          set +e
+          rm -rf /tmp/cpai-pgo
+          mkdir -p /tmp/cpai-pgo
+          cmake -S /tmp/llama-candidate -B /tmp/llama-candidate/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_AVX2=ON \
+            -DGGML_FMA=ON \
+            -DGGML_F16C=ON \
+            -DGGML_OPENMP=ON \
+            -DGGML_CURL=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fprofile-generate=/tmp/cpai-pgo -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fprofile-generate=/tmp/cpai-pgo -fomit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto -fprofile-generate=/tmp/cpai-pgo" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-flto -fprofile-generate=/tmp/cpai-pgo" &&
+          cmake --build /tmp/llama-candidate/build --clean-first --config Release -j4 --target llama-server &&
+          CPAI_LLAMA_SERVER=/tmp/llama-candidate/build/bin/llama-server \
+            python -m cpai.benchmark \
+              --thread-candidates 4 \
+              --batch-candidates 256 \
+              --ubatch-candidates 256 \
+              --tokens 256 \
+              --runs 2 \
+              --output /tmp/cpai-pgo-training.json &&
+          cmake -S /tmp/llama-candidate -B /tmp/llama-candidate/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_AVX2=ON \
+            -DGGML_FMA=ON \
+            -DGGML_F16C=ON \
+            -DGGML_OPENMP=ON \
+            -DGGML_CURL=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_C_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fprofile-use=/tmp/cpai-pgo -fprofile-correction -fprofile-partial-training -Wno-missing-profile -fomit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG -flto -fprofile-use=/tmp/cpai-pgo -fprofile-correction -fprofile-partial-training -Wno-missing-profile -fomit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-flto -fprofile-use=/tmp/cpai-pgo" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-flto -fprofile-use=/tmp/cpai-pgo" &&
+          cmake --build /tmp/llama-candidate/build --clean-first --config Release -j4 --target llama-server test-backend-ops &&
+          /tmp/llama-candidate/build/bin/test-backend-ops -b CPU -j 4 -o MUL_MAT &&
+          CPAI_LLAMA_SERVER=/tmp/llama-candidate/build/bin/llama-server \
+            python -m cpai.benchmark \
+              --thread-candidates 4 \
+              --batch-candidates 256 \
+              --ubatch-candidates 256 \
+              --tokens 256 \
+              --runs 5 \
+              --output results/avx2-kernel-pgo.json
+          pgo_status=$?
+          if [ "$pgo_status" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "PGO build, training, correctness test and benchmark succeeded."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "PGO experiment failed with exit code $pgo_status; standard A/B results are retained."
+          fi
+          exit 0
+
       - name: Compare identical-hardware benchmark results
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
+          PGO_AVAILABLE: ${{ steps.pgo.outputs.available }}
         run: |
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           baseline_path = Path("results/upstream-baseline.json")
@@ -184,14 +256,28 @@ jobs:
 
           base_tps = median(baseline)
           candidate_tps = median(candidate)
-          delta = (candidate_tps / base_tps - 1.0) * 100.0
           comparison = {
               "same_runner_cpu": baseline.get("cpu"),
               "baseline_median_tok_s": base_tps,
-              "candidate_median_tok_s": candidate_tps,
-              "delta_percent": round(delta, 2),
-              "candidate_faster": candidate_tps > base_tps,
+              "avx2_median_tok_s": candidate_tps,
+              "avx2_delta_percent": round((candidate_tps / base_tps - 1.0) * 100.0, 2),
+              "pgo_available": os.environ.get("PGO_AVAILABLE") == "true",
           }
+          pgo_path = Path("results/avx2-kernel-pgo.json")
+          if pgo_path.exists():
+              pgo = json.loads(pgo_path.read_text(encoding="utf-8"))
+              pgo["engine_build"] = {
+                  "repository": "https://github.com/ggml-org/llama.cpp",
+                  "pull_request": 31061,
+                  "commit": "b77e97fcf3ab296391db149d9a38628913e181d6",
+                  "variant": "AVX2 quantized dot-product kernels + GCC PGO",
+                  "training": "Qwen2.5-1.5B-Instruct-GGUF Q4_K_M, 256 generated tokens",
+              }
+              pgo_path.write_text(json.dumps(pgo, indent=2) + "\n", encoding="utf-8")
+              pgo_tps = median(pgo)
+              comparison["pgo_median_tok_s"] = pgo_tps
+              comparison["pgo_delta_vs_upstream_percent"] = round((pgo_tps / base_tps - 1.0) * 100.0, 2)
+              comparison["pgo_delta_vs_avx2_percent"] = round((pgo_tps / candidate_tps - 1.0) * 100.0, 2)
           Path("results/ab-comparison.json").write_text(
               json.dumps(comparison, indent=2) + "\n", encoding="utf-8"
           )
