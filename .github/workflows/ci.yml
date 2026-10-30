@@ -8,6 +8,14 @@ on:
         required: true
         type: boolean
         default: false
+      model_quantization:
+        description: "GGUF quantization to benchmark"
+        required: true
+        type: choice
+        options:
+          - Q4_K_M
+          - Q4_0
+        default: Q4_K_M
 
 permissions:
   contents: read
@@ -68,12 +76,14 @@ jobs:
             echo "affinity=$(taskset -pc $$)"
             echo "cgroup_cpu_max=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || true)"
             echo "cgroup_cpuset=$(cat /sys/fs/cgroup/cpuset.cpus.effective 2>/dev/null || true)"
+            echo "model_quantization=${{ inputs.model_quantization }}"
           } | tee results/environment.txt
       - name: Run CPU scheduling and speculative benchmark
         env:
           CPAI_LLAMA_SERVER: ${{ github.workspace }}/llama.cpp/build/bin/llama-server
         run: >-
           python -m cpai.benchmark
+          --model "Qwen/Qwen2.5-1.5B-Instruct-GGUF:${{ inputs.model_quantization }}"
           --thread-candidates 1,2,3,4
           --cpu-strict-candidates 0,1
           --poll-candidates 0,50,100
