@@ -47,17 +47,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ccache libcurl4-openssl-dev
 
+      - name: Fingerprint runner CPU for safe native-code caching
+        id: cpu
+        run: |
+          {
+            lscpu | grep -E '^(Architecture|CPU\(s\)|Vendor ID|Model name|Thread\(s\) per core|Core\(s\) per socket):'
+            grep -m1 '^flags' /proc/cpuinfo
+          } > "$RUNNER_TEMP/cpu-info.txt"
+          cp "$RUNNER_TEMP/cpu-info.txt" "$GITHUB_WORKSPACE/.ccache-cpu-info"
+          fingerprint="$(sha256sum "$RUNNER_TEMP/cpu-info.txt" | cut -c1-16)"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/cpu-info.txt"
+          echo "CPU cache fingerprint: $fingerprint"
+
       - name: Restore llama.cpp compiler cache
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-${{ runner.arch }}-llama-cpp-ccache-${{ github.run_id }}
+          key: ${{ runner.os }}-${{ runner.arch }}-llama-cpp-${{ steps.cpu.outputs.fingerprint }}-${{ github.run_id }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-llama-cpp-ccache-
+            ${{ runner.os }}-${{ runner.arch }}-llama-cpp-${{ steps.cpu.outputs.fingerprint }}-
 
       - name: Configure compiler cache
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
         run: |
           mkdir -p "$CCACHE_DIR"
           ccache --set-config=max_size=2G
@@ -65,14 +79,10 @@ jobs:
           ccache --zero-stats
           ccache --show-stats
 
-      - name: Show runner CPU capabilities
-        run: |
-          lscpu
-          grep -m1 '^flags' /proc/cpuinfo || true
-
       - name: Build and benchmark upstream baseline
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
         run: |
@@ -108,6 +118,7 @@ jobs:
       - name: Build, test and benchmark vendored AVX2 kernel patch
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
           CCACHE_MAXSIZE: 2G
           CCACHE_COMPILERCHECK: content
         run: |
@@ -147,6 +158,7 @@ jobs:
       - name: Compare identical-hardware benchmark results
         env:
           CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_EXTRAFILES: ${{ github.workspace }}/.ccache-cpu-info
         run: |
           python - <<'PY'
           import json
