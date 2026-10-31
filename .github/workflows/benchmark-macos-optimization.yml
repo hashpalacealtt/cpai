@@ -1,0 +1,272 @@
+name: macOS CPU optimization
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpai-macos-optimization-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    name: macOS ${{ matrix.arch }} optimization
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            cpu: Apple Silicon M1
+          - runner: macos-15-intel
+            arch: x64
+            cpu: Intel x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+
+      - name: Resolve llama.cpp revision
+        id: llama
+        shell: bash
+        run: echo "sha=$(git -C llama.cpp rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Install native build dependencies
+        run: brew install libomp ccache
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Restore native llama.cpp build cache
+        uses: actions/cache@v4
+        with:
+          path: llama.cpp/build
+          key: macos-${{ matrix.arch }}-llama-${{ steps.llama.outputs.sha }}-native-openmp-accelerate-v1
+          restore-keys: |
+            macos-${{ matrix.arch }}-llama-
+
+      - name: Restore model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/llama.cpp
+            ~/.cache/huggingface
+          key: macos-${{ matrix.arch }}-cpai-qwen35-2b-q4km-v1
+          restore-keys: |
+            macos-${{ matrix.arch }}-cpai-model-
+
+      - name: Build llama.cpp for native macOS CPU
+        shell: bash
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+        run: |
+          export LIBOMP_PREFIX="$(brew --prefix libomp)"
+          ccache --max-size=2G
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_METAL=OFF \
+            -DGGML_OPENMP=ON \
+            -DGGML_BLAS=ON \
+            -DGGML_BLAS_VENDOR=Apple \
+            -DOpenMP_ROOT="$LIBOMP_PREFIX" \
+            -DCMAKE_PREFIX_PATH="$LIBOMP_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(sysctl -n hw.ncpu)"
+          ccache --show-stats
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          matches=[p.resolve() for p in Path("llama.cpp/build").rglob("llama-server") if p.is_file()]
+          if not matches:
+              raise SystemExit("llama-server not found after build")
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              f.write(f"CPAI_LLAMA_SERVER={matches[0]}\n")
+          print(f"Using {matches[0]}")
+          PY
+
+      - name: Install cpai
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - name: Record macOS hardware and build details
+        shell: bash
+        run: |
+          mkdir -p results
+          {
+            echo "runner=$RUNNER_NAME"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "matrix_cpu=${{ matrix.cpu }}"
+            echo "uname=$(uname -a)"
+            echo "machine=$(uname -m)"
+            echo "logical_cpus=$(sysctl -n hw.logicalcpu)"
+            echo "physical_cpus=$(sysctl -n hw.physicalcpu)"
+            echo "cpu_brand=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model)"
+            echo "memory_bytes=$(sysctl -n hw.memsize)"
+            clang --version | head -n 1
+            cmake --version | head -n 1
+            echo "model=Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M"
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+            echo "build_flags=GGML_NATIVE=ON,GGML_METAL=OFF,GGML_OPENMP=ON,GGML_BLAS=ON,GGML_BLAS_VENDOR=Apple,Release"
+          } | tee results/environment.txt
+
+      - name: Phase 1 - thread and scheduler sweep
+        shell: bash
+        env:
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
+          HF_HUB_DISABLE_TELEMETRY: "1"
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates 1,2,3,4 \
+            --threads-batch-candidates 1,2,4 \
+            --cpu-strict-candidates 0 \
+            --poll-candidates 0,50 \
+            --poll-batch-candidates 0,1 \
+            --speculative-candidates none \
+            --tokens 128 \
+            --runs 2 \
+            --batch-candidates 512 \
+            --ubatch-candidates 128 \
+            --output results/phase1-scheduler.json
+
+      - name: Select best scheduler configuration
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          b=json.load(open("results/phase1-scheduler.json",encoding="utf-8"))["best_configuration"]
+          values={"BEST_THREADS":b["threads"],"BEST_BATCH_THREADS":b["threads_batch"],"BEST_CPU_STRICT":int(b["cpu_strict"]),"BEST_POLL":b["poll"],"BEST_POLL_BATCH":int(bool(b["poll_batch"]))}
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              for k,v in values.items(): f.write(f"{k}={v}\n")
+          print("Selected scheduler:",values,"median tok/s:",b["summary"]["generation_tokens_per_second_median"])
+          PY
+
+      - name: Phase 2 - batch and microbatch sweep
+        shell: bash
+        env:
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates "$BEST_THREADS" \
+            --threads-batch-candidates "$BEST_BATCH_THREADS" \
+            --cpu-strict-candidates "$BEST_CPU_STRICT" \
+            --poll-candidates "$BEST_POLL" \
+            --poll-batch-candidates "$BEST_POLL_BATCH" \
+            --speculative-candidates none \
+            --tokens 128 \
+            --runs 2 \
+            --batch-candidates 256,512,1024 \
+            --ubatch-candidates 64,128,256 \
+            --output results/phase2-batch.json
+
+      - name: Select best batch configuration
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          b=json.load(open("results/phase2-batch.json",encoding="utf-8"))["best_configuration"]
+          values={"BEST_THREADS":b["threads"],"BEST_BATCH_THREADS":b["threads_batch"],"BEST_CPU_STRICT":int(b["cpu_strict"]),"BEST_POLL":b["poll"],"BEST_POLL_BATCH":int(bool(b["poll_batch"])),"BEST_BATCH":b["batch_size"],"BEST_UBATCH":b["ubatch_size"]}
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              for k,v in values.items(): f.write(f"{k}={v}\n")
+          print("Selected batch config:",values,"median tok/s:",b["summary"]["generation_tokens_per_second_median"])
+          PY
+
+      - name: Phase 3 - speculative decoding A/B
+        shell: bash
+        env:
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates "$BEST_THREADS" \
+            --threads-batch-candidates "$BEST_BATCH_THREADS" \
+            --cpu-strict-candidates "$BEST_CPU_STRICT" \
+            --poll-candidates "$BEST_POLL" \
+            --poll-batch-candidates "$BEST_POLL_BATCH" \
+            --speculative-candidates none,ngram-mod \
+            --speculative-tokens 64 \
+            --tokens 128 \
+            --runs 2 \
+            --batch-candidates "$BEST_BATCH" \
+            --ubatch-candidates "$BEST_UBATCH" \
+            --output results/phase3-speculative.json
+
+      - name: Select final candidate
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          b=json.load(open("results/phase3-speculative.json",encoding="utf-8"))["best_configuration"]
+          values={"BEST_THREADS":b["threads"],"BEST_BATCH_THREADS":b["threads_batch"],"BEST_CPU_STRICT":int(b["cpu_strict"]),"BEST_POLL":b["poll"],"BEST_POLL_BATCH":int(bool(b["poll_batch"])),"BEST_BATCH":b["batch_size"],"BEST_UBATCH":b["ubatch_size"],"BEST_SPECULATIVE":b["speculative_type"]}
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              for k,v in values.items(): f.write(f"{k}={v}\n")
+          print("Final candidate:",values,"screening median tok/s:",b["summary"]["generation_tokens_per_second_median"])
+          PY
+
+      - name: Final validation - 9 x 384 tokens
+        shell: bash
+        env:
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates "$BEST_THREADS" \
+            --threads-batch-candidates "$BEST_BATCH_THREADS" \
+            --cpu-strict-candidates "$BEST_CPU_STRICT" \
+            --poll-candidates "$BEST_POLL" \
+            --poll-batch-candidates "$BEST_POLL_BATCH" \
+            --speculative-candidates "$BEST_SPECULATIVE" \
+            --speculative-tokens 64 \
+            --tokens 384 \
+            --runs 9 \
+            --batch-candidates "$BEST_BATCH" \
+            --ubatch-candidates "$BEST_UBATCH" \
+            --output results/final-validation.json
+
+      - name: Publish per-architecture optimization report
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          lines=["## macOS CPU optimization — ${{ matrix.cpu }} (${{ matrix.arch }})","", "Runner: `${{ matrix.runner }}`", ""]
+          env=Path("results/environment.txt")
+          if env.exists(): lines += ["```text",env.read_text(encoding="utf-8")[-5000:],"```",""]
+          for name,title in [("phase1-scheduler.json","Phase 1 — scheduler"),("phase2-batch.json","Phase 2 — batch / ubatch"),("phase3-speculative.json","Phase 3 — speculative decoding"),("final-validation.json","Final validation (9 x 384 tokens)")]:
+              p=Path("results")/name
+              if not p.exists(): continue
+              d=json.loads(p.read_text(encoding="utf-8")); b=d.get("best_configuration",{}); s=b.get("summary",{})
+              lines += [f"### {title}",f"- Median: **{s.get('generation_tokens_per_second_median','n/a')} tok/s**",f"- Min / max: {s.get('generation_tokens_per_second_min','n/a')} / {s.get('generation_tokens_per_second_max','n/a')} tok/s",f"- CV: {s.get('generation_tokens_per_second_cv_percent','n/a')}%",f"- Threads / batch threads: {b.get('threads','n/a')} / {b.get('threads_batch','n/a')}",f"- Batch / ubatch: {b.get('batch_size','n/a')} / {b.get('ubatch_size','n/a')}",f"- Poll / poll-batch: {b.get('poll','n/a')} / {b.get('poll_batch','n/a')}",f"- Speculative: {b.get('speculative_type','n/a')}",""]
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-macos-${{ matrix.arch }}-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
