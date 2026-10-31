@@ -57,16 +57,16 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(sysctl -n hw.ncpu)"
-          python - <<'PY'
-          import os
-          from pathlib import Path
-          matches=[p.resolve() for p in Path("llama.cpp/build").rglob("llama-server") if p.is_file()]
-          if not matches:
-              raise SystemExit("llama-server not found after build")
-          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
-              f.write(f"CPAI_LLAMA_SERVER={matches[0]}\\n")
-          print(f"Using {matches[0]}")
-          PY
+          cmake --install llama.cpp/build --prefix "$RUNNER_TEMP/llama-install"
+          SERVER="$(find "$RUNNER_TEMP/llama-install" llama.cpp/build -type f -name llama-server -perm -111 -print -quit)"
+          if [ -z "$SERVER" ]; then
+            echo "llama-server executable not found; build tree diagnostics:"
+            find llama.cpp/build -maxdepth 5 -type f -perm -111 -print | head -80
+            exit 1
+          fi
+          echo "CPAI_LLAMA_SERVER=$(cd "$(dirname "$SERVER")" && pwd)/$(basename "$SERVER")" >> "$GITHUB_ENV"
+          echo "Using llama-server: $SERVER"
+          "$SERVER" --version
       - name: Install cpai
         run: python -m pip install --upgrade pip && python -m pip install -e .
       - name: Record hardware and software details
