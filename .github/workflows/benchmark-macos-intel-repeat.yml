@@ -1,0 +1,154 @@
+name: macOS Intel repeatability benchmark
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cpai-macos-intel-repeatability
+  cancel-in-progress: false
+jobs:
+  repeatability:
+    name: Intel i7-8700B — 18 x 384 tokens
+    runs-on: macos-15-intel
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: 0ec4027a2a0183de87c007069adddc06e665f7de
+          path: llama.cpp
+      - name: Install native build dependencies
+        run: brew install libomp ccache
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Restore native llama.cpp build cache
+        uses: actions/cache@v4
+        with:
+          path: llama.cpp/build
+          key: macos-x64-llama-0ec4027a2a0183de87c007069adddc06e665f7de-native-openmp-accelerate-v1
+      - name: Restore model cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/llama.cpp
+            ~/.cache/huggingface
+          key: macos-x64-cpai-qwen35-2b-q4km-v1
+          restore-keys: |
+            macos-x64-cpai-model-
+      - name: Build llama.cpp for native macOS CPU
+        shell: bash
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+        run: |
+          export LIBOMP_PREFIX="$(brew --prefix libomp)"
+          ccache --max-size=2G
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_METAL=OFF \
+            -DGGML_OPENMP=ON \
+            -DGGML_BLAS=ON \
+            -DGGML_BLAS_VENDOR=Apple \
+            -DOpenMP_ROOT="$LIBOMP_PREFIX" \
+            -DCMAKE_PREFIX_PATH="$LIBOMP_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(sysctl -n hw.ncpu)"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          matches=[p.resolve() for p in Path("llama.cpp/build").rglob("llama-server") if p.is_file()]
+          if not matches:
+              raise SystemExit("llama-server not found after build")
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              f.write(f"CPAI_LLAMA_SERVER={matches[0]}\\n")
+          print(f"Using {matches[0]}")
+          PY
+      - name: Install cpai
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+      - name: Record hardware and software details
+        shell: bash
+        run: |
+          mkdir -p results
+          {
+            echo "runner=$RUNNER_NAME"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            echo "uname=$(uname -a)"
+            echo "machine=$(uname -m)"
+            echo "logical_cpus=$(sysctl -n hw.logicalcpu)"
+            echo "physical_cpus=$(sysctl -n hw.physicalcpu)"
+            echo "cpu_brand=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sysctl -n hw.model)"
+            echo "memory_bytes=$(sysctl -n hw.memsize)"
+            clang --version | head -n 1
+            cmake --version | head -n 1
+            echo "model=Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M"
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+            echo "build_flags=GGML_NATIVE=ON,GGML_METAL=OFF,GGML_OPENMP=ON,GGML_BLAS=ON,GGML_BLAS_VENDOR=Apple,Release"
+            echo "test=18 repetitions x 384 generated tokens; exact prior Intel final-validation settings"
+          } | tee results/environment.txt
+      - name: Repeat exact Intel final validation — 18 x 384 tokens
+        shell: bash
+        env:
+          OMP_DYNAMIC: "FALSE"
+          OMP_PROC_BIND: close
+          OMP_PLACES: cores
+          HF_HUB_DISABLE_TELEMETRY: "1"
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates 4 \
+            --threads-batch-candidates 2 \
+            --cpu-strict-candidates 0 \
+            --poll-candidates 50 \
+            --poll-batch-candidates 0 \
+            --speculative-candidates ngram-mod \
+            --speculative-tokens 64 \
+            --tokens 384 \
+            --runs 18 \
+            --batch-candidates 512 \
+            --ubatch-candidates 64 \
+            --output results/repeat-validation.json
+      - name: Publish repeatability summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path("results/repeat-validation.json")
+          lines=["## Intel repeatability — 18 x 384 tokens",""]
+          if p.exists():
+              d=json.loads(p.read_text(encoding="utf-8"))
+              b=d.get("best_configuration",{})
+              s=b.get("summary",{})
+              lines += [
+                f"- Median: **{s.get('generation_tokens_per_second_median','n/a')} tok/s**",
+                f"- Min / max: {s.get('generation_tokens_per_second_min','n/a')} / {s.get('generation_tokens_per_second_max','n/a')} tok/s",
+                f"- Standard deviation: {s.get('generation_tokens_per_second_stdev','n/a')} tok/s",
+                f"- CV: {s.get('generation_tokens_per_second_cv_percent','n/a')}%",
+                f"- Threads / batch threads: {b.get('threads','n/a')} / {b.get('threads_batch','n/a')}",
+                f"- Batch / ubatch: {b.get('batch_size','n/a')} / {b.get('ubatch_size','n/a')}",
+                f"- Poll / poll-batch: {b.get('poll','n/a')} / {b.get('poll_batch','n/a')}",
+                f"- Speculative: {b.get('speculative_type','n/a')}",
+                "",
+                "### Individual repetitions",
+              ]
+              for i,r in enumerate(b.get("runs",[]),1):
+                  lines.append(f"{i}. {r.get('generation_tokens_per_second','n/a')} tok/s ({r.get('generated_tokens','?')} tokens)")
+          else:
+              lines.append("Benchmark output was not produced.")
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as f:
+              f.write("\\n".join(lines)+"\\n")
+          print("\\n".join(lines))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-macos-intel-repeat-18-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
