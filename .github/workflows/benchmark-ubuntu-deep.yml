@@ -1,0 +1,207 @@
+name: Ubuntu deep CPU optimization
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpai-ubuntu-deep-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    name: Ubuntu ${{ matrix.bind }}-${{ matrix.places }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bind: close
+            places: cores
+          - bind: close
+            places: threads
+          - bind: spread
+            places: cores
+          - bind: spread
+            places: threads
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OMP_DYNAMIC: "FALSE"
+      OMP_PROC_BIND: ${{ matrix.bind }}
+      OMP_PLACES: ${{ matrix.places }}
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+
+      - name: Resolve llama.cpp revision
+        id: llama
+        run: echo "sha=$(git -C llama.cpp rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ccache
+
+      - name: Cache native llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: llama.cpp/build
+          key: ubuntu-${{ matrix.bind }}-${{ matrix.places }}-llama-${{ steps.llama.outputs.sha }}-native-openmp-v3
+
+      - name: Cache model files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/llama.cpp
+            ~/.cache/huggingface
+          key: ubuntu-cpai-qwen35-2b-q4km-v2
+          restore-keys: ubuntu-cpai-qwen35-2b-
+
+      - name: Build native llama.cpp
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+        shell: bash
+        run: |
+          ccache --max-size=2G
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_OPENMP=ON \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(nproc)"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          matches=[p.resolve() for p in Path("llama.cpp/build").rglob("llama-server") if p.is_file()]
+          if not matches: raise SystemExit("llama-server not found after build")
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f: f.write(f"CPAI_LLAMA_SERVER={matches[0]}\n")
+          print("Using",matches[0])
+          PY
+
+      - name: Install cpai
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - name: Record exact runner environment
+        shell: bash
+        run: |
+          mkdir -p results
+          {
+            cat /etc/os-release
+            echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH"
+            uname -a
+            lscpu
+            echo "nproc=$(nproc)"
+            echo "cpu_quota=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || true)"
+            echo "memory_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
+            echo "omp_dynamic=$OMP_DYNAMIC omp_proc_bind=$OMP_PROC_BIND omp_places=$OMP_PLACES"
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+            echo "model=Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M"
+          } | tee results/environment.txt
+
+      - name: Phase 1 - extended thread and scheduler sweep
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates 1,2,3,4,6,8 \
+            --threads-batch-candidates 1,2,4 \
+            --cpu-strict-candidates 0 \
+            --poll-candidates 0,50 \
+            --poll-batch-candidates 0,1 \
+            --speculative-candidates none \
+            --tokens 128 --runs 2 \
+            --batch-candidates 512 --ubatch-candidates 128 \
+            --output results/phase1-threads.json
+
+      - name: Select best scheduler configuration
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          b=json.load(open("results/phase1-threads.json",encoding="utf-8"))["best_configuration"]
+          values={"BEST_THREADS":b["threads"],"BEST_BATCH_THREADS":b["threads_batch"],"BEST_CPU_STRICT":int(b["cpu_strict"]),"BEST_POLL":b["poll"],"BEST_POLL_BATCH":int(bool(b["poll_batch"]))}
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              for k,v in values.items(): f.write(f"{k}={v}\n")
+          print("Best scheduler:",values,"median:",b["summary"]["generation_tokens_per_second_median"],"tok/s")
+          PY
+
+      - name: Phase 2 - expanded batch and microbatch sweep
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates "$BEST_THREADS" \
+            --threads-batch-candidates "$BEST_BATCH_THREADS" \
+            --cpu-strict-candidates "$BEST_CPU_STRICT" \
+            --poll-candidates "$BEST_POLL" \
+            --poll-batch-candidates "$BEST_POLL_BATCH" \
+            --speculative-candidates none \
+            --tokens 128 --runs 3 \
+            --batch-candidates 256,512,1024,2048 \
+            --ubatch-candidates 64,128,256,512 \
+            --output results/phase2-batch.json
+
+      - name: Select best batch configuration
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          b=json.load(open("results/phase2-batch.json",encoding="utf-8"))["best_configuration"]
+          values={"BEST_THREADS":b["threads"],"BEST_BATCH_THREADS":b["threads_batch"],"BEST_CPU_STRICT":int(b["cpu_strict"]),"BEST_POLL":b["poll"],"BEST_POLL_BATCH":int(bool(b["poll_batch"])),"BEST_BATCH":b["batch_size"],"BEST_UBATCH":b["ubatch_size"]}
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f:
+              for k,v in values.items(): f.write(f"{k}={v}\n")
+          print("Best batch:",values,"median:",b["summary"]["generation_tokens_per_second_median"],"tok/s")
+          PY
+
+      - name: Final validation - 9 x 384 tokens
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates "$BEST_THREADS" \
+            --threads-batch-candidates "$BEST_BATCH_THREADS" \
+            --cpu-strict-candidates "$BEST_CPU_STRICT" \
+            --poll-candidates "$BEST_POLL" \
+            --poll-batch-candidates "$BEST_POLL_BATCH" \
+            --speculative-candidates none \
+            --tokens 384 --runs 9 \
+            --batch-candidates "$BEST_BATCH" \
+            --ubatch-candidates "$BEST_UBATCH" \
+            --output results/final-validation.json
+
+      - name: Publish report
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          lines=["## Ubuntu deep optimization — ${{ matrix.bind }} / ${{ matrix.places }}","", "Runner: `ubuntu-latest`", ""]
+          p=Path("results/environment.txt")
+          if p.exists(): lines += ["```text",p.read_text(encoding="utf-8")[-6000:],"```",""]
+          for name,title in [("phase1-threads.json","Phase 1 — scheduler"),("phase2-batch.json","Phase 2 — batch / ubatch"),("final-validation.json","Final validation (9 x 384 tokens)")]:
+              p=Path("results")/name
+              if not p.exists(): continue
+              d=json.loads(p.read_text(encoding="utf-8")); b=d.get("best_configuration",{}); s=b.get("summary",{})
+              lines += [f"### {title}",f"- Median: **{s.get('generation_tokens_per_second_median','n/a')} tok/s**",f"- Min / max: {s.get('generation_tokens_per_second_min','n/a')} / {s.get('generation_tokens_per_second_max','n/a')} tok/s",f"- CV: {s.get('generation_tokens_per_second_cv_percent','n/a')}%",f"- Threads / batch threads: {b.get('threads','n/a')} / {b.get('threads_batch','n/a')}",f"- Batch / ubatch: {b.get('batch_size','n/a')} / {b.get('ubatch_size','n/a')}",f"- Poll / poll-batch: {b.get('poll','n/a')} / {b.get('poll_batch','n/a')}",""]
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-ubuntu-${{ matrix.bind }}-${{ matrix.places }}-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
