@@ -1,0 +1,155 @@
+name: CPU benchmark — 20 configurations / 100 measurements
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpai-benchmark-20x100-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: "${{ matrix.id }} — t${{ matrix.threads }}/bt${{ matrix.batch_threads }}"
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include:
+          - { id: C01-baseline-2t, threads: 2, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 64, bind: close, places: threads }
+          - { id: C02-baseline-4t, threads: 4, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 64, bind: close, places: threads }
+          - { id: C03-batch-2t, threads: 2, batch_threads: 2, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 1024, ubatch: 64, bind: close, places: cores }
+          - { id: C04-batch-4t, threads: 4, batch_threads: 4, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 1024, ubatch: 64, bind: close, places: cores }
+          - { id: C05-ubatch128, threads: 2, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 128, bind: spread, places: threads }
+          - { id: C06-ubatch256, threads: 4, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 1024, ubatch: 256, bind: spread, places: threads }
+          - { id: C07-poll50, threads: 2, batch_threads: 1, strict: 0, poll: 50, poll_batch: 0, spec: none, batch: 512, ubatch: 64, bind: close, places: threads }
+          - { id: C08-poll100, threads: 4, batch_threads: 1, strict: 0, poll: 100, poll_batch: 0, spec: none, batch: 512, ubatch: 64, bind: close, places: threads }
+          - { id: C09-pollbatch, threads: 2, batch_threads: 2, strict: 0, poll: 0, poll_batch: 1, spec: none, batch: 512, ubatch: 64, bind: spread, places: cores }
+          - { id: C10-strict, threads: 2, batch_threads: 1, strict: 1, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 64, bind: close, places: cores }
+          - { id: C11-ngram2t, threads: 2, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: ngram-mod, batch: 512, ubatch: 64, bind: spread, places: threads }
+          - { id: C12-ngram4t, threads: 4, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: ngram-mod, batch: 512, ubatch: 64, bind: spread, places: threads }
+          - { id: C13-batch256, threads: 2, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 256, ubatch: 64, bind: close, places: threads }
+          - { id: C14-batch2048, threads: 4, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 2048, ubatch: 128, bind: spread, places: cores }
+          - { id: C15-thread1, threads: 1, batch_threads: 1, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 64, bind: close, places: threads }
+          - { id: C16-thread3, threads: 3, batch_threads: 2, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 128, bind: spread, places: cores }
+          - { id: C17-thread6, threads: 6, batch_threads: 2, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 512, ubatch: 128, bind: close, places: threads }
+          - { id: C18-threads8, threads: 8, batch_threads: 4, strict: 0, poll: 0, poll_batch: 0, spec: none, batch: 1024, ubatch: 128, bind: spread, places: threads }
+          - { id: C19-poll-ngram, threads: 2, batch_threads: 1, strict: 0, poll: 50, poll_batch: 1, spec: ngram-mod, batch: 1024, ubatch: 64, bind: spread, places: cores }
+          - { id: C20-strict-ngram, threads: 4, batch_threads: 2, strict: 1, poll: 0, poll_batch: 0, spec: ngram-mod, batch: 1024, ubatch: 128, bind: close, places: cores }
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OMP_DYNAMIC: "FALSE"
+      OMP_PROC_BIND: ${{ matrix.bind }}
+      OMP_PLACES: ${{ matrix.places }}
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          ref: master
+          path: llama.cpp
+      - name: Resolve llama.cpp revision
+        id: llama
+        run: echo "sha=$(git -C llama.cpp rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ccache
+      - name: Cache native llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: llama.cpp/build
+          key: ubuntu-20x100-llama-${{ steps.llama.outputs.sha }}-native-openmp-v1
+      - name: Cache model files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/llama.cpp
+            ~/.cache/huggingface
+          key: ubuntu-cpai-qwen35-2b-q4km-v2
+          restore-keys: ubuntu-cpai-qwen35-2b-
+      - name: Build native llama.cpp
+        env:
+          CCACHE_DIR: ~/.cache/ccache
+        shell: bash
+        run: |
+          ccache --max-size=2G
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DGGML_NATIVE=ON \
+            -DGGML_OPENMP=ON \
+            -DLLAMA_CURL=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build llama.cpp/build --config Release --target llama-server --parallel "$(nproc)"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          matches=[p.resolve() for p in Path("llama.cpp/build").rglob("llama-server") if p.is_file()]
+          if not matches: raise SystemExit("llama-server not found after build")
+          with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as f: f.write(f"CPAI_LLAMA_SERVER={matches[0]}\n")
+          print("Using",matches[0])
+          PY
+      - name: Install cpai
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+      - name: Record runner and exact configuration
+        shell: bash
+        run: |
+          mkdir -p results
+          {
+            cat /etc/os-release
+            echo "runner_os=$RUNNER_OS runner_arch=$RUNNER_ARCH"
+            uname -a
+            lscpu
+            echo "nproc=$(nproc)"
+            echo "cpu_quota=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null || true)"
+            echo "memory_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
+            echo "config=${{ matrix.id }} threads=${{ matrix.threads }} batch_threads=${{ matrix.batch_threads }} strict=${{ matrix.strict }} poll=${{ matrix.poll }} poll_batch=${{ matrix.poll_batch }} speculative=${{ matrix.spec }} batch=${{ matrix.batch }} ubatch=${{ matrix.ubatch }} bind=${{ matrix.bind }} places=${{ matrix.places }}"
+            echo "llama_cpp_commit=$(git -C llama.cpp rev-parse HEAD)"
+            echo "model=Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M"
+          } | tee results/environment.txt
+      - name: Run 5 measured repetitions (100 total across matrix)
+        run: |
+          python -m cpai.benchmark \
+            --model "Jackrong/Qwen3.5-2B-Claude-4.6-Opus-Reasoning-Distilled-GGUF:Q4_K_M" \
+            --thread-candidates "${{ matrix.threads }}" \
+            --threads-batch-candidates "${{ matrix.batch_threads }}" \
+            --cpu-strict-candidates "${{ matrix.strict }}" \
+            --poll-candidates "${{ matrix.poll }}" \
+            --poll-batch-candidates "${{ matrix.poll_batch }}" \
+            --speculative-candidates "${{ matrix.spec }}" \
+            --speculative-tokens 64 \
+            --tokens 384 --runs 5 \
+            --batch-candidates "${{ matrix.batch }}" \
+            --ubatch-candidates "${{ matrix.ubatch }}" \
+            --output "results/${{ matrix.id }}.json"
+      - name: Publish per-run summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p=Path("results/${{ matrix.id }}.json")
+          lines=["## ${{ matrix.id }}", "", "Configuration: `${{ matrix.threads }} threads / ${{ matrix.batch_threads }} batch threads / batch ${{ matrix.batch }} / ubatch ${{ matrix.ubatch }} / poll ${{ matrix.poll }} / speculative ${{ matrix.spec }}`", ""]
+          if p.exists():
+              d=json.loads(p.read_text(encoding="utf-8")); b=d["best_configuration"]; s=b["summary"]
+              lines += [f"- Median: **{s['generation_tokens_per_second_median']} tok/s**", f"- Min / max: {s['generation_tokens_per_second_min']} / {s['generation_tokens_per_second_max']} tok/s", f"- CV: {s['generation_tokens_per_second_cv_percent']}%", f"- Repetitions: {len(b['runs'])}"]
+          else:
+              lines += ["- Benchmark result missing; inspect job logs."]
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a",encoding="utf-8") as f: f.write("\n".join(lines)+"\n")
+          print("\n".join(lines))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cpai-${{ matrix.id }}-${{ github.run_id }}
+          path: results/
+          if-no-files-found: warn
+          retention-days: 30
